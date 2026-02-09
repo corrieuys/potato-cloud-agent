@@ -1,0 +1,181 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+)
+
+// Client communicates with the control plane
+type Client struct {
+	baseURL    string
+	apiKey     string
+	httpClient *http.Client
+}
+
+// NewClient creates a new API client
+func NewClient(baseURL, apiKey string) *Client {
+	return &Client{
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// Service represents a service in the desired state
+type Service struct {
+	ID                  string            `json:"id"`
+	Name                string            `json:"name"`
+	GitURL              string            `json:"git_url"`
+	GitRef              string            `json:"git_ref"`
+	GitCommit           string            `json:"git_commit"`
+	GitSSHKey           string            `json:"git_ssh_key"`
+	BuildCommand        string            `json:"build_command"`
+	RunCommand          string            `json:"run_command"`
+	Runtime             string            `json:"runtime"`
+	DockerfilePath      string            `json:"dockerfile_path"`
+	DockerContext       string            `json:"docker_context"`
+	DockerContainerPort int               `json:"docker_container_port"`
+	ImageRetainCount    int               `json:"image_retain_count"`
+	Port                int               `json:"port"`
+	ExternalPath        string            `json:"external_path"`
+	HealthCheckPath     string            `json:"health_check_path"`
+	HealthCheckInterval int               `json:"health_check_interval"`
+	EnvironmentVars     map[string]string `json:"environment_vars"`
+}
+
+// DesiredState represents the full desired state from the control plane
+type DesiredState struct {
+	StackID           string    `json:"stack_id"`
+	Version           int       `json:"version"`
+	Hash              string    `json:"hash"`
+	PollInterval      int       `json:"poll_interval"`
+	SecurityMode      string    `json:"security_mode"`
+	ExternalProxyPort int       `json:"external_proxy_port"`
+	Services          []Service `json:"services"`
+}
+
+// GetDesiredState fetches the desired state from the control plane
+func (c *Client) GetDesiredState(stackID string) (*DesiredState, error) {
+	url := fmt.Sprintf("%s/api/stacks/%s/desired-state", c.baseURL, stackID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch desired state: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var state DesiredState
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &state, nil
+}
+
+// RegistrationRequest represents a request to register a new agent
+type RegistrationRequest struct {
+	InstallToken string `json:"install_token"`
+	Hostname     string `json:"hostname"`
+	IPAddress    string `json:"ip_address"`
+}
+
+// RegistrationResponse represents the response from registration
+type RegistrationResponse struct {
+	AgentID      string `json:"agent_id"`
+	APIKey       string `json:"api_key"`
+	StackID      string `json:"stack_id"`
+	PollInterval int    `json:"poll_interval"`
+}
+
+// Register exchanges an install token for permanent credentials
+func Register(baseURL string, req RegistrationRequest) (*RegistrationResponse, error) {
+	url := fmt.Sprintf("%s/api/agents/register", baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to register: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("registration failed with status: %d", resp.StatusCode)
+	}
+
+	var result RegistrationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// HeartbeatRequest represents a heartbeat payload
+type HeartbeatRequest struct {
+	StackVersion   int                    `json:"stack_version"`
+	AgentStatus    string                 `json:"agent_status"`
+	ServicesStatus []ServiceStatus        `json:"services_status"`
+	SecurityState  map[string]interface{} `json:"security_state"`
+	SystemInfo     map[string]interface{} `json:"system_info"`
+}
+
+// ServiceStatus represents the status of a running service
+type ServiceStatus struct {
+	ServiceID    string `json:"service_id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"` // "running", "stopped", "error", "building"
+	PID          int    `json:"pid,omitempty"`
+	RestartCount int    `json:"restart_count"`
+	LastError    string `json:"last_error,omitempty"`
+	HealthStatus string `json:"health_status,omitempty"`
+}
+
+// SendHeartbeat sends a heartbeat to the control plane
+func (c *Client) SendHeartbeat(req HeartbeatRequest) error {
+	url := fmt.Sprintf("%s/api/agents/heartbeat", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal heartbeat: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Key", c.apiKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send heartbeat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("heartbeat failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
