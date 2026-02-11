@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -103,6 +104,15 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 			}
 			err = retryErr
 			log.Printf("Git clone retry failed: %v", retryErr)
+		}
+		if strings.Contains(err.Error(), "invalid auth method") {
+			log.Printf("Git clone fallback to git CLI for url=%s", gitURL)
+			_ = os.RemoveAll(destPath)
+			if cliErr := cloneWithGitCLI(gitURL, destPath); cliErr == nil {
+				return nil
+			} else {
+				err = cliErr
+			}
 		}
 		return fmt.Errorf("git clone failed: %w", err)
 	}
@@ -240,6 +250,15 @@ func repoConfigURL(repo *git.Repository) string {
 		}
 	}
 	return ""
+}
+
+func cloneWithGitCLI(gitURL, destPath string) error {
+	cmd := exec.Command("git", "clone", gitURL, destPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone (cli) failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // GetRepoPath returns the filesystem path for a service's repository
