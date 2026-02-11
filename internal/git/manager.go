@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,8 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 		return err
 	}
 
+	log.Printf("Git clone: url=%s sshKey=%q useSSH=%t auth=%t", gitURL, sshKeyName, isSSHGitURL(gitURL), auth != nil)
+
 	_, err = git.PlainClone(destPath, false, &git.CloneOptions{
 		URL:      gitURL,
 		Progress: os.Stdout,
@@ -87,7 +90,9 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 	})
 
 	if err != nil {
+		log.Printf("Git clone failed: %v", err)
 		if auth != nil && strings.Contains(err.Error(), "invalid auth method") {
+			log.Printf("Git clone retry without auth for url=%s", gitURL)
 			_ = os.RemoveAll(destPath)
 			_, retryErr := git.PlainClone(destPath, false, &git.CloneOptions{
 				URL:      gitURL,
@@ -97,6 +102,7 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 				return nil
 			}
 			err = retryErr
+			log.Printf("Git clone retry failed: %v", retryErr)
 		}
 		return fmt.Errorf("git clone failed: %w", err)
 	}
