@@ -51,7 +51,7 @@ func (m *Manager) CloneOrPull(serviceID string, gitURL string, gitRef string, gi
 	}
 
 	if gitCommit != "" {
-		resolved, err := m.checkoutCommit(repo, gitCommit, sshKeyName)
+		resolved, err := m.checkoutCommit(repoPath, repo, gitCommit, sshKeyName)
 		if err != nil {
 			return "", err
 		}
@@ -62,7 +62,7 @@ func (m *Manager) CloneOrPull(serviceID string, gitURL string, gitRef string, gi
 		gitRef = "main"
 	}
 
-	resolved, err := m.checkoutRef(repo, gitRef, sshKeyName)
+	resolved, err := m.checkoutRef(repoPath, repo, gitRef, sshKeyName)
 	if err != nil {
 		return "", err
 	}
@@ -120,7 +120,7 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 	return nil
 }
 
-func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName string) (string, error) {
+func (m *Manager) checkoutCommit(repoPath string, repo *git.Repository, commit string, sshKeyName string) (string, error) {
 	worktree, err := repo.Worktree()
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
@@ -134,9 +134,12 @@ func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName
 	// First fetch to ensure we have the commit
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 		log.Printf("Git fetch failed (commit=%s): %v", commit, err)
-		if strings.Contains(err.Error(), "invalid auth method") && auth != nil {
+		if strings.Contains(err.Error(), "invalid auth method") {
 			if retryErr := repo.Fetch(&git.FetchOptions{Progress: os.Stdout}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
 				log.Printf("Git fetch retry without auth failed (commit=%s): %v", commit, retryErr)
+			}
+			if cliErr := fetchWithGitCLI(repoPath); cliErr != nil {
+				log.Printf("Git fetch CLI failed (commit=%s): %v", commit, cliErr)
 			}
 		}
 	}
@@ -155,7 +158,7 @@ func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName
 	return resolved, nil
 }
 
-func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName string) (string, error) {
+func (m *Manager) checkoutRef(repoPath string, repo *git.Repository, ref string, sshKeyName string) (string, error) {
 	worktree, err := repo.Worktree()
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
@@ -168,9 +171,12 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 		log.Printf("Git fetch failed (ref=%s): %v", ref, err)
-		if strings.Contains(err.Error(), "invalid auth method") && auth != nil {
+		if strings.Contains(err.Error(), "invalid auth method") {
 			if retryErr := repo.Fetch(&git.FetchOptions{Progress: os.Stdout}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
 				log.Printf("Git fetch retry without auth failed (ref=%s): %v", ref, retryErr)
+			}
+			if cliErr := fetchWithGitCLI(repoPath); cliErr != nil {
+				log.Printf("Git fetch CLI failed (ref=%s): %v", ref, cliErr)
 			}
 		}
 	}
@@ -179,9 +185,12 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 	if err := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef, Force: true}); err == nil {
 		if err := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 			log.Printf("Git pull failed (ref=%s): %v", ref, err)
-			if strings.Contains(err.Error(), "invalid auth method") && auth != nil {
+			if strings.Contains(err.Error(), "invalid auth method") {
 				if retryErr := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
 					log.Printf("Git pull retry without auth failed (ref=%s): %v", ref, retryErr)
+				}
+				if cliErr := pullWithGitCLI(repoPath, ref); cliErr != nil {
+					log.Printf("Git pull CLI failed (ref=%s): %v", ref, cliErr)
 				}
 			}
 		}
@@ -271,6 +280,24 @@ func repoConfigURL(repo *git.Repository) string {
 		}
 	}
 	return ""
+}
+
+func fetchWithGitCLI(repoPath string) error {
+	cmd := exec.Command("git", "-C", repoPath, "fetch", "--all")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git fetch (cli) failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func pullWithGitCLI(repoPath, ref string) error {
+	cmd := exec.Command("git", "-C", repoPath, "pull", "--ff-only", "origin", ref)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git pull (cli) failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func cloneWithGitCLI(gitURL, destPath string) error {
