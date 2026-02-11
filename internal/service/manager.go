@@ -326,6 +326,12 @@ func (m *Manager) prepareEnvironment(service api.Service) []string {
 }
 
 func (m *Manager) startContainer(name, imageID string, hostPort int, containerPort int, env []string, command []string) (string, error) {
+	if containerExists(name) {
+		log.Printf("[ServiceManager] Existing container found, removing: %s", name)
+		if err := stopContainer(name); err != nil {
+			log.Printf("[ServiceManager] Failed to remove existing container %s: %v", name, err)
+		}
+	}
 	portBinding := fmt.Sprintf("%d:%d", hostPort, containerPort)
 	args := []string{"run", "-d", "--name", name, "-p", portBinding}
 
