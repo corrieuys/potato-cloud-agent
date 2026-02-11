@@ -134,13 +134,25 @@ func (m *Manager) checkoutCommit(repoPath string, repo *git.Repository, commit s
 	// First fetch to ensure we have the commit
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 		log.Printf("Git fetch failed (commit=%s): %v", commit, err)
+		fetchErr := err
 		if strings.Contains(err.Error(), "invalid auth method") {
 			if retryErr := repo.Fetch(&git.FetchOptions{Progress: os.Stdout}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
 				log.Printf("Git fetch retry without auth failed (commit=%s): %v", commit, retryErr)
+				fetchErr = retryErr
+			} else {
+				fetchErr = nil
 			}
-			if cliErr := fetchWithGitCLI(repoPath); cliErr != nil {
-				log.Printf("Git fetch CLI failed (commit=%s): %v", commit, cliErr)
+			if fetchErr != nil {
+				if cliErr := fetchWithGitCLI(repoPath); cliErr != nil {
+					log.Printf("Git fetch CLI failed (commit=%s): %v", commit, cliErr)
+					fetchErr = cliErr
+				} else {
+					fetchErr = nil
+				}
 			}
+		}
+		if fetchErr != nil {
+			return "", fmt.Errorf("failed to fetch latest commit: %w", fetchErr)
 		}
 	}
 
@@ -171,13 +183,25 @@ func (m *Manager) checkoutRef(repoPath string, repo *git.Repository, ref string,
 
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 		log.Printf("Git fetch failed (ref=%s): %v", ref, err)
+		fetchErr := err
 		if strings.Contains(err.Error(), "invalid auth method") {
 			if retryErr := repo.Fetch(&git.FetchOptions{Progress: os.Stdout}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
 				log.Printf("Git fetch retry without auth failed (ref=%s): %v", ref, retryErr)
+				fetchErr = retryErr
+			} else {
+				fetchErr = nil
 			}
-			if cliErr := fetchWithGitCLI(repoPath); cliErr != nil {
-				log.Printf("Git fetch CLI failed (ref=%s): %v", ref, cliErr)
+			if fetchErr != nil {
+				if cliErr := fetchWithGitCLI(repoPath); cliErr != nil {
+					log.Printf("Git fetch CLI failed (ref=%s): %v", ref, cliErr)
+					fetchErr = cliErr
+				} else {
+					fetchErr = nil
+				}
 			}
+		}
+		if fetchErr != nil {
+			return "", fmt.Errorf("failed to fetch latest ref %s: %w", ref, fetchErr)
 		}
 	}
 
@@ -185,13 +209,25 @@ func (m *Manager) checkoutRef(repoPath string, repo *git.Repository, ref string,
 	if err := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef, Force: true}); err == nil {
 		if err := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 			log.Printf("Git pull failed (ref=%s): %v", ref, err)
+			pullErr := err
 			if strings.Contains(err.Error(), "invalid auth method") {
 				if retryErr := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
 					log.Printf("Git pull retry without auth failed (ref=%s): %v", ref, retryErr)
+					pullErr = retryErr
+				} else {
+					pullErr = nil
 				}
-				if cliErr := pullWithGitCLI(repoPath, ref); cliErr != nil {
-					log.Printf("Git pull CLI failed (ref=%s): %v", ref, cliErr)
+				if pullErr != nil {
+					if cliErr := pullWithGitCLI(repoPath, ref); cliErr != nil {
+						log.Printf("Git pull CLI failed (ref=%s): %v", ref, cliErr)
+						pullErr = cliErr
+					} else {
+						pullErr = nil
+					}
 				}
+			}
+			if pullErr != nil {
+				return "", fmt.Errorf("failed to pull latest ref %s: %w", ref, pullErr)
 			}
 		}
 		head, err := repo.Head()
