@@ -127,7 +127,7 @@ Generated Dockerfiles:
 Get your install token from the Potato Cloud dashboard, then run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/corrieuys/potato-cloud-agent/main/install.sh | sudo bash -s -- --token <INSTALL_TOKEN> --control-plane https://your-control-plane.workers.dev
+curl -fsSL https://potatocloud.space/install.sh | sudo bash -s -- --token <INSTALL_TOKEN> --control-plane https://your-control-plane.workers.dev
 ```
 
 The install script will:

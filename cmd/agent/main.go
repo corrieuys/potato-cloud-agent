@@ -30,6 +30,7 @@ func main() {
 		sshKeyName    = flag.String("ssh-key-name", "default", "SSH key name to generate (filename under ssh dir)")
 		configPath    = flag.String("config", config.ConfigPath(), "Path to config file")
 		controlPlane  = flag.String("control-plane", "http://localhost:8787", "Control plane URL")
+		setAPIKey     = flag.String("set-api-key", "", "Update stored API key in agent config")
 		applyFirewall = flag.Bool("apply-firewall", false, "Apply firewall rules (requires root)")
 		showStatus    = flag.Bool("status", false, "Show current service status")
 
@@ -70,6 +71,13 @@ func main() {
 	if *showStatus {
 		if err := printServiceStatus(*configPath); err != nil {
 			log.Fatalf("Failed to get status: %v", err)
+		}
+		return
+	}
+
+	if *setAPIKey != "" {
+		if err := handleSetAPIKey(*configPath, *setAPIKey); err != nil {
+			log.Fatalf("Failed to update API key: %v", err)
 		}
 		return
 	}
@@ -927,5 +935,27 @@ func handleShowLogs(configPath, serviceID string, follow bool) error {
 		}
 	}
 
+	return nil
+}
+
+// handleSetAPIKey updates the stored API key in the agent config file.
+func handleSetAPIKey(configPath, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return fmt.Errorf("API key cannot be empty")
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg.APIKey = apiKey
+	if err := cfg.Save(configPath); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println("✓ API key updated in config")
+	fmt.Println("Note: Restart the agent service to apply the new key.")
 	return nil
 }
