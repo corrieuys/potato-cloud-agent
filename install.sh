@@ -12,6 +12,10 @@ INSTALL_TOKEN=""
 CONTROL_PLANE="https://api.potato-cloud.com"
 VERSION="latest"
 FORCE_REGISTER="false"
+SERVICE_NAME="potato-cloud-agent"
+SERVICE_FILE="/etc/systemd/system/potato-cloud-agent.service"
+TEMP_BINARY=""
+BACKUP_BINARY=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -38,6 +42,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Error: run as root (sudo)"
+  exit 1
+fi
 
 if [ -z "$INSTALL_TOKEN" ] && [ ! -f "$CONFIG_DIR/config.json" ]; then
   echo "Error: --token is required"
@@ -84,8 +93,22 @@ else
   DOWNLOAD_URL="${RELEASE_BASE_URL}/download/${VERSION}/${BINARY_NAME}"
 fi
 
-curl -fL "$DOWNLOAD_URL" -o "$INSTALL_DIR/potato-cloud-agent"
-chmod +x "$INSTALL_DIR/potato-cloud-agent"
+TEMP_BINARY="${INSTALL_DIR}/.potato-cloud-agent.tmp"
+BACKUP_BINARY="${INSTALL_DIR}/potato-cloud-agent.bak"
+
+curl -fL "$DOWNLOAD_URL" -o "$TEMP_BINARY"
+chmod +x "$TEMP_BINARY"
+
+if systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"; then
+  echo "Stopping existing agent service..."
+  systemctl stop "$SERVICE_NAME" || true
+fi
+
+if [ -f "$INSTALL_DIR/potato-cloud-agent" ]; then
+  cp "$INSTALL_DIR/potato-cloud-agent" "$BACKUP_BINARY"
+fi
+
+mv "$TEMP_BINARY" "$INSTALL_DIR/potato-cloud-agent"
 
 # Register the agent (skip if config already exists unless forced)
 if [ -f "$CONFIG_DIR/config.json" ] && [ "$FORCE_REGISTER" != "true" ]; then
@@ -100,7 +123,7 @@ fi
 
 # Create systemd service
 echo "Creating systemd service..."
-cat > /etc/systemd/system/potato-cloud-agent.service << 'EOF'
+cat > "$SERVICE_FILE" << 'EOF'
 [Unit]
 Description=Potato Cloud Agent
 After=network.target
@@ -119,19 +142,24 @@ EOF
 
 # Reload systemd and enable service
 systemctl daemon-reload
-systemctl enable potato-cloud-agent
+systemctl enable "$SERVICE_NAME"
 
 # Start the service
 echo "Starting agent service..."
-systemctl start potato-cloud-agent
+systemctl start "$SERVICE_NAME"
 
 # Check status
-if systemctl is-active --quiet potato-cloud-agent; then
+if systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "✓ Potato Cloud Agent installed and running"
   echo "  Config: $CONFIG_DIR/config.json"
   echo "  Data: $DATA_DIR"
-  echo "  Logs: journalctl -u potato-cloud-agent -f"
+  echo "  Logs: journalctl -u $SERVICE_NAME -f"
 else
   echo "✗ Agent failed to start. Check logs with: journalctl -u potato-cloud-agent -e"
+  if [ -f "$BACKUP_BINARY" ]; then
+    echo "Attempting rollback to previous binary..."
+    mv "$BACKUP_BINARY" "$INSTALL_DIR/potato-cloud-agent"
+    systemctl start "$SERVICE_NAME" || true
+  fi
   exit 1
 fi

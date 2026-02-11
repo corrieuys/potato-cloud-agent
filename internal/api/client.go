@@ -26,6 +26,17 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
+// Language constants
+const (
+	LangNodeJS  = "nodejs"
+	LangGo      = "golang"
+	LangPython  = "python"
+	LangRust    = "rust"
+	LangJava    = "java"
+	LangGeneric = "generic"
+	LangAuto    = "auto"
+)
+
 // Service represents a service in the desired state
 type Service struct {
 	ID                  string            `json:"id"`
@@ -34,17 +45,11 @@ type Service struct {
 	GitRef              string            `json:"git_ref"`
 	GitCommit           string            `json:"git_commit"`
 	GitSSHKey           string            `json:"git_ssh_key"`
-	BuildCommand        string            `json:"build_command"`
-	RunCommand          string            `json:"run_command"`
-	Runtime             string            `json:"runtime"`
-	DockerfilePath      string            `json:"dockerfile_path"`
-	DockerContext       string            `json:"docker_context"`
-	DockerContainerPort int               `json:"docker_container_port"`
-	ImageRetainCount    int               `json:"image_retain_count"`
-	Port                int               `json:"port"`
+	BaseImage           string            `json:"base_image"` // Optional: override default base image
+	Language            string            `json:"language"`   // Language/runtime: nodejs, golang, python, rust, java, generic, auto
 	ExternalPath        string            `json:"external_path"`
 	HealthCheckPath     string            `json:"health_check_path"`
-	HealthCheckInterval int               `json:"health_check_interval"`
+	HealthCheckInterval int               `json:"health_check_interval"` // Defaults to global config
 	EnvironmentVars     map[string]string `json:"environment_vars"`
 }
 

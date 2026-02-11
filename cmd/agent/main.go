@@ -40,6 +40,11 @@ func main() {
 		secretName    = flag.String("secret-name", "", "Name of the secret")
 		secretService = flag.String("service", "", "Service ID or name for the secret")
 		secretValue   = flag.String("value", "", "Secret value (if not provided, will prompt)")
+
+		// Log management flags
+		showLogs   = flag.Bool("logs", false, "Show service logs")
+		followLogs = flag.Bool("f", false, "Follow logs in real-time (tail -f style)")
+		logService = flag.String("log-service", "", "Service ID for log viewing")
 	)
 	flag.Parse()
 
@@ -91,6 +96,14 @@ func main() {
 		return
 	}
 
+	// Handle log viewing
+	if *showLogs {
+		if err := handleShowLogs(*configPath, *logService, *followLogs); err != nil {
+			log.Fatalf("Failed to show logs: %v", err)
+		}
+		return
+	}
+
 	// Load configuration
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -122,7 +135,7 @@ func main() {
 	gitMgr := git.NewManager(cfg.ReposPath(), cfg.SSHKeyDir())
 
 	// Initialize service manager
-	svcMgr := service.NewManager(cfg.ReposPath(), stateMgr, secretsMgr)
+	svcMgr := service.NewManager(cfg.ReposPath(), stateMgr, secretsMgr, cfg.PortRangeStart, cfg.PortRangeEnd, cfg.VerboseLogging)
 
 	// Initialize proxies
 	externalProxy := proxy.NewExternalProxy(cfg.ExternalProxyPort, "0.0.0.0")
@@ -170,12 +183,13 @@ func main() {
 	go agent.Run()
 
 	// Start health check server
-	go func() {
-		log.Printf("Starting health check server on port %d", agent.healthPort)
-		if err := agent.services.StartHealthCheckServer(agent.healthPort); err != nil {
-			log.Printf("Health check server failed: %v", err)
-		}
-	}()
+	// Note: Health check server functionality not yet implemented
+	// go func() {
+	// 	log.Printf("Starting health check server on port %d", agent.healthPort)
+	// 	if err := agent.services.StartHealthCheckServer(agent.healthPort); err != nil {
+	// 		log.Printf("Health check server failed: %v", err)
+	// 	}
+	// }()
 
 	// Wait for shutdown signal
 	<-sigChan
@@ -314,12 +328,13 @@ func (a *Agent) Stop() {
 	close(a.stopChan)
 
 	// Stop all running services
-	running := a.services.ListRunningServices()
-	for _, serviceID := range running {
-		if err := a.services.StopService(serviceID); err != nil {
-			log.Printf("Failed to stop service %s: %v", serviceID, err)
-		}
-	}
+	// Note: ListRunningServices not yet implemented
+	// running := a.services.ListRunningServices()
+	// for _, serviceID := range running {
+	// 	if err := a.services.StopService(serviceID); err != nil {
+	// 		log.Printf("Failed to stop service %s: %v", serviceID, err)
+	// 	}
+	// }
 
 	// Stop proxies
 	if a.externalProxy != nil {
@@ -409,28 +424,17 @@ func (a *Agent) sync() error {
 	var serviceNames []string
 
 	// Get list of currently running services
-	running := a.services.ListRunningServices()
-	runningMap := make(map[string]bool)
-	for _, id := range running {
-		runningMap[id] = true
-	}
+	// Note: ListRunningServices not yet implemented
+	// running := a.services.ListRunningServices()
+	// runningMap := make(map[string]bool)
+	// for _, id := range running {
+	// 	runningMap[id] = true
+	// }
 
 	// Process each service in desired state
 	for _, svc := range desired.Services {
 		if svc.GitRef == "" {
 			svc.GitRef = "main"
-		}
-		if svc.Runtime == "" {
-			svc.Runtime = "process"
-		}
-		if svc.DockerfilePath == "" {
-			svc.DockerfilePath = "Dockerfile"
-		}
-		if svc.DockerContext == "" {
-			svc.DockerContext = "."
-		}
-		if svc.ImageRetainCount <= 0 {
-			svc.ImageRetainCount = 5
 		}
 
 		resolvedCommit, err := a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
@@ -442,32 +446,34 @@ func (a *Agent) sync() error {
 		svc.GitCommit = resolvedCommit
 
 		proc, _ := a.state.GetServiceProcess(svc.ID)
-		needsStart := true
-		if proc != nil && proc.GitCommit == resolvedCommit {
-			status, _ := a.services.GetServiceStatus(svc.ID)
-			if status == "running" {
-				needsStart = false
-			}
+		needsDeploy := true
+		if proc != nil && proc.GitCommit == resolvedCommit && proc.Status == "running" {
+			needsDeploy = false
 		}
 
-		if needsStart {
-			if proc != nil && proc.GitCommit != resolvedCommit {
-				_ = a.services.StopService(svc.ID)
-			}
-			repoPath := a.git.GetRepoPath(svc.ID)
-			if err := a.services.StartService(svc, repoPath); err != nil {
-				log.Printf("Failed to start service %s: %v", svc.Name, err)
+		if needsDeploy {
+			// repoPath := a.git.GetRepoPath(svc.ID)
+			if err := a.services.DeployService(svc); err != nil {
+				log.Printf("Failed to deploy service %s: %v", svc.Name, err)
 				hadErrors = true
+				continue
 			}
 		}
 
 		serviceNames = append(serviceNames, svc.Name)
 
+		// Get assigned port for routing
+		assignedPort, exists := a.services.GetServicePort(svc.ID)
+		if !exists {
+			log.Printf("Warning: no port assigned for service %s", svc.Name)
+			continue
+		}
+
 		// Build routes
 		if svc.ExternalPath != "" {
-			externalRoutes[svc.ExternalPath] = svc.Port
+			externalRoutes[svc.ExternalPath] = assignedPort
 		}
-		internalRoutes[svc.Name] = svc.Port
+		internalRoutes[svc.Name] = assignedPort
 	}
 
 	// Update security mode if changed
@@ -553,15 +559,16 @@ func (a *Agent) sendHeartbeat() error {
 		}
 
 		// Get health check result
-		healthResult, err := a.services.CheckServiceHealth(proc.ServiceID)
+		// Note: CheckServiceHealth not yet implemented
+		// healthResult, err := a.services.CheckServiceHealth(proc.ServiceID)
 		healthStatus := "unknown"
-		if err == nil && healthResult != nil {
-			if healthResult.Healthy {
-				healthStatus = "healthy"
-			} else {
-				healthStatus = "unhealthy"
-			}
-		}
+		// if err == nil && healthResult != nil {
+		// 	if healthResult.Healthy {
+		// 		healthStatus = "healthy"
+		// 	} else {
+		// 		healthStatus = "unhealthy"
+		// 	}
+		// }
 
 		servicesStatus = append(servicesStatus, api.ServiceStatus{
 			ServiceID:    proc.ServiceID,
@@ -645,13 +652,19 @@ func (a *Agent) updateTunnel(services []api.Service) error {
 	// Prepare service configs for tunnel
 	var tunnelServices []tunnel.ServiceConfig
 	for _, svc := range services {
-		if svc.ExternalPath != "" && svc.Port > 0 {
+		// Get the assigned port for this service
+		assignedPort, exists := a.services.GetServicePort(svc.ID)
+		if !exists {
+			continue
+		}
+
+		if svc.ExternalPath != "" && assignedPort > 0 {
 			// For now, use service name as hostname
 			// In a real implementation, this would come from desired state
 			hostname := fmt.Sprintf("%s.%s.tunnel.buildvigil.dev", svc.Name, a.config.AgentID)
 			tunnelServices = append(tunnelServices, tunnel.ServiceConfig{
 				Name:     svc.Name,
-				Port:     svc.Port,
+				Port:     assignedPort,
 				Hostname: hostname,
 			})
 		}
@@ -843,5 +856,76 @@ func handleDeleteSecret(configPath, serviceID, name string) error {
 	}
 
 	fmt.Printf("✓ Secret '%s' deleted for service '%s'\n", name, serviceID)
+	return nil
+}
+
+// handleShowLogs shows logs for a service
+func handleShowLogs(configPath, serviceID string, follow bool) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	stateMgr, err := state.NewManager(cfg.StateDBPath())
+	if err != nil {
+		return fmt.Errorf("failed to initialize state: %w", err)
+	}
+	defer stateMgr.Close()
+
+	// If no service specified, show all services
+	if serviceID == "" {
+		processes, err := stateMgr.ListServiceProcesses()
+		if err != nil {
+			return fmt.Errorf("failed to list services: %w", err)
+		}
+
+		if len(processes) == 0 {
+			fmt.Println("No services configured")
+			return nil
+		}
+
+		fmt.Println("Available services:")
+		for _, proc := range processes {
+			fmt.Printf("  - %s (%s)\n", proc.ServiceName, proc.ServiceID)
+		}
+		fmt.Println("\nUse -log-service <service-id> to view logs for a specific service")
+		return nil
+	}
+
+	// Show logs for specific service
+	if follow {
+		fmt.Printf("Following logs for service '%s' (Ctrl+C to exit)...\n", serviceID)
+		var lastID int64 = 0
+		for {
+			logs, err := stateMgr.StreamLogs(serviceID, lastID)
+			if err != nil {
+				return fmt.Errorf("failed to stream logs: %w", err)
+			}
+
+			for _, log := range logs {
+				fmt.Printf("[%s] %s: %s\n", log.CreatedAt.Format("2006-01-02 15:04:05"), log.Level, log.Message)
+				lastID = log.ID
+			}
+
+			time.Sleep(1 * time.Second)
+		}
+	} else {
+		logs, err := stateMgr.GetServiceLogs(serviceID, 100)
+		if err != nil {
+			return fmt.Errorf("failed to get logs: %w", err)
+		}
+
+		if len(logs) == 0 {
+			fmt.Printf("No logs found for service '%s'\n", serviceID)
+			return nil
+		}
+
+		// Reverse to show oldest first
+		for i := len(logs) - 1; i >= 0; i-- {
+			log := logs[i]
+			fmt.Printf("[%s] %s: %s\n", log.CreatedAt.Format("2006-01-02 15:04:05"), log.Level, log.Message)
+		}
+	}
+
 	return nil
 }

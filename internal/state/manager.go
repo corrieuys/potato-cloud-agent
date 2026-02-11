@@ -46,11 +46,16 @@ func migrate(db *sql.DB) error {
 		service_id TEXT PRIMARY KEY,
 		service_name TEXT NOT NULL,
 		git_commit TEXT NOT NULL,
-		runtime TEXT NOT NULL DEFAULT 'process',
+		runtime TEXT NOT NULL DEFAULT 'docker',
 		container_id TEXT,
 		container_name TEXT,
 		image_tag TEXT,
 		pid INTEGER,
+		port INTEGER,
+		green_port INTEGER,
+		active_port INTEGER,
+		base_image TEXT,
+		language TEXT,
 		status TEXT NOT NULL DEFAULT 'stopped',
 		restart_count INTEGER DEFAULT 0,
 		last_error TEXT,
@@ -83,10 +88,15 @@ func migrate(db *sql.DB) error {
 
 func ensureServiceProcessColumns(db *sql.DB) error {
 	columns := map[string]string{
-		"runtime":        "TEXT NOT NULL DEFAULT 'process'",
+		"runtime":        "TEXT NOT NULL DEFAULT 'docker'",
 		"container_id":   "TEXT",
 		"container_name": "TEXT",
 		"image_tag":      "TEXT",
+		"port":           "INTEGER",
+		"green_port":     "INTEGER",
+		"active_port":    "INTEGER",
+		"base_image":     "TEXT",
+		"language":       "TEXT",
 	}
 
 	rows, err := db.Query("PRAGMA table_info(service_processes)")
@@ -177,6 +187,11 @@ type ServiceProcess struct {
 	ContainerName string    `json:"container_name"`
 	ImageTag      string    `json:"image_tag"`
 	PID           int       `json:"pid"`
+	Port          int       `json:"port"`        // Blue port (base port)
+	GreenPort     int       `json:"green_port"`  // Green port (base + 1)
+	ActivePort    int       `json:"active_port"` // Currently active port (blue or green)
+	BaseImage     string    `json:"base_image"`
+	Language      string    `json:"language"`
 	Status        string    `json:"status"`
 	RestartCount  int       `json:"restart_count"`
 	LastError     string    `json:"last_error"`
@@ -187,14 +202,16 @@ type ServiceProcess struct {
 // GetServiceProcess retrieves a service process record
 func (m *Manager) GetServiceProcess(serviceID string) (*ServiceProcess, error) {
 	row := m.db.QueryRow(`
-		SELECT service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, status, restart_count, last_error, started_at, updated_at
+		SELECT service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, port, green_port, active_port, base_image, language, status, restart_count, last_error, started_at, updated_at
 		FROM service_processes
 		WHERE service_id = ?
 	`, serviceID)
 
 	var p ServiceProcess
 	var startedAt, updatedAt sql.NullString
-	err := row.Scan(&p.ServiceID, &p.ServiceName, &p.GitCommit, &p.Runtime, &p.ContainerID, &p.ContainerName, &p.ImageTag, &p.PID, &p.Status, &p.RestartCount, &p.LastError, &startedAt, &updatedAt)
+	var port, greenPort, activePort sql.NullInt64
+	var baseImage, language sql.NullString
+	err := row.Scan(&p.ServiceID, &p.ServiceName, &p.GitCommit, &p.Runtime, &p.ContainerID, &p.ContainerName, &p.ImageTag, &p.PID, &port, &greenPort, &activePort, &baseImage, &language, &p.Status, &p.RestartCount, &p.LastError, &startedAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -202,6 +219,21 @@ func (m *Manager) GetServiceProcess(serviceID string) (*ServiceProcess, error) {
 		return nil, fmt.Errorf("failed to get service process: %w", err)
 	}
 
+	if port.Valid {
+		p.Port = int(port.Int64)
+	}
+	if greenPort.Valid {
+		p.GreenPort = int(greenPort.Int64)
+	}
+	if activePort.Valid {
+		p.ActivePort = int(activePort.Int64)
+	}
+	if baseImage.Valid {
+		p.BaseImage = baseImage.String
+	}
+	if language.Valid {
+		p.Language = language.String
+	}
 	if startedAt.Valid {
 		p.StartedAt, _ = time.Parse(time.RFC3339, startedAt.String)
 	}
@@ -215,7 +247,7 @@ func (m *Manager) GetServiceProcess(serviceID string) (*ServiceProcess, error) {
 // ListServiceProcesses returns all service processes
 func (m *Manager) ListServiceProcesses() ([]ServiceProcess, error) {
 	rows, err := m.db.Query(`
-		SELECT service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, status, restart_count, last_error, started_at, updated_at
+		SELECT service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, port, base_image, language, status, restart_count, last_error, started_at, updated_at
 		FROM service_processes
 	`)
 	if err != nil {
@@ -227,8 +259,19 @@ func (m *Manager) ListServiceProcesses() ([]ServiceProcess, error) {
 	for rows.Next() {
 		var p ServiceProcess
 		var startedAt, updatedAt sql.NullString
-		if err := rows.Scan(&p.ServiceID, &p.ServiceName, &p.GitCommit, &p.Runtime, &p.ContainerID, &p.ContainerName, &p.ImageTag, &p.PID, &p.Status, &p.RestartCount, &p.LastError, &startedAt, &updatedAt); err != nil {
+		var port sql.NullInt64
+		var baseImage, language sql.NullString
+		if err := rows.Scan(&p.ServiceID, &p.ServiceName, &p.GitCommit, &p.Runtime, &p.ContainerID, &p.ContainerName, &p.ImageTag, &p.PID, &port, &baseImage, &language, &p.Status, &p.RestartCount, &p.LastError, &startedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan service process: %w", err)
+		}
+		if port.Valid {
+			p.Port = int(port.Int64)
+		}
+		if baseImage.Valid {
+			p.BaseImage = baseImage.String
+		}
+		if language.Valid {
+			p.Language = language.String
 		}
 		if startedAt.Valid {
 			p.StartedAt, _ = time.Parse(time.RFC3339, startedAt.String)
@@ -245,11 +288,11 @@ func (m *Manager) ListServiceProcesses() ([]ServiceProcess, error) {
 // SaveServiceProcess saves or updates a service process record
 func (m *Manager) SaveServiceProcess(p *ServiceProcess) error {
 	if p.Runtime == "" {
-		p.Runtime = "process"
+		p.Runtime = "docker"
 	}
 	_, err := m.db.Exec(`
-		INSERT INTO service_processes (service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, status, restart_count, last_error, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO service_processes (service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, port, green_port, active_port, base_image, language, status, restart_count, last_error, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(service_id) DO UPDATE SET
 			service_name = excluded.service_name,
 			git_commit = excluded.git_commit,
@@ -258,12 +301,17 @@ func (m *Manager) SaveServiceProcess(p *ServiceProcess) error {
 			container_name = excluded.container_name,
 			image_tag = excluded.image_tag,
 			pid = excluded.pid,
+			port = excluded.port,
+			green_port = excluded.green_port,
+			active_port = excluded.active_port,
+			base_image = excluded.base_image,
+			language = excluded.language,
 			status = excluded.status,
 			restart_count = excluded.restart_count,
 			last_error = excluded.last_error,
 			started_at = excluded.started_at,
 			updated_at = excluded.updated_at
-	`, p.ServiceID, p.ServiceName, p.GitCommit, p.Runtime, p.ContainerID, p.ContainerName, p.ImageTag, p.PID, p.Status, p.RestartCount, p.LastError, p.StartedAt)
+	`, p.ServiceID, p.ServiceName, p.GitCommit, p.Runtime, p.ContainerID, p.ContainerName, p.ImageTag, p.PID, p.Port, p.GreenPort, p.ActivePort, p.BaseImage, p.Language, p.Status, p.RestartCount, p.LastError, p.StartedAt)
 
 	if err != nil {
 		return fmt.Errorf("failed to save service process: %w", err)
@@ -298,7 +346,7 @@ func (m *Manager) LogServiceMessage(serviceID, level, message string) error {
 // GetAllServiceProcesses retrieves all service processes
 func (m *Manager) GetAllServiceProcesses() []*ServiceProcess {
 	rows, err := m.db.Query(`
-		SELECT service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, status, restart_count, last_error, started_at, updated_at
+		SELECT service_id, service_name, git_commit, runtime, container_id, container_name, image_tag, pid, port, base_image, language, status, restart_count, last_error, started_at, updated_at
 		FROM service_processes
 		ORDER BY service_id
 	`)
@@ -311,17 +359,27 @@ func (m *Manager) GetAllServiceProcesses() []*ServiceProcess {
 	for rows.Next() {
 		var p ServiceProcess
 		var pid sql.NullInt64
+		var port sql.NullInt64
 		var restartCount sql.NullInt64
-		var lastError sql.NullString
+		var baseImage, language, lastError sql.NullString
 		var startedAt, updatedAt sql.NullString
 
-		err := rows.Scan(&p.ServiceID, &p.ServiceName, &p.GitCommit, &p.Runtime, &p.ContainerID, &p.ContainerName, &p.ImageTag, &pid, &p.Status, &restartCount, &lastError, &startedAt, &updatedAt)
+		err := rows.Scan(&p.ServiceID, &p.ServiceName, &p.GitCommit, &p.Runtime, &p.ContainerID, &p.ContainerName, &p.ImageTag, &pid, &port, &baseImage, &language, &p.Status, &restartCount, &lastError, &startedAt, &updatedAt)
 		if err != nil {
 			continue
 		}
 
 		if pid.Valid {
 			p.PID = int(pid.Int64)
+		}
+		if port.Valid {
+			p.Port = int(port.Int64)
+		}
+		if baseImage.Valid {
+			p.BaseImage = baseImage.String
+		}
+		if language.Valid {
+			p.Language = language.String
 		}
 		if restartCount.Valid {
 			p.RestartCount = int(restartCount.Int64)
@@ -381,4 +439,85 @@ func (m *Manager) GetServiceLogs(serviceID string, limit int) ([]struct {
 	}
 
 	return logs, nil
+}
+
+// StreamLogs streams logs for a service in real-time
+func (m *Manager) StreamLogs(serviceID string, lastID int64) ([]struct {
+	ID        int64     `json:"id"`
+	Level     string    `json:"level"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}, error) {
+	rows, err := m.db.Query(`
+		SELECT id, level, message, created_at
+		FROM service_logs
+		WHERE service_id = ? AND id > ?
+		ORDER BY created_at ASC
+	`, serviceID, lastID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []struct {
+		ID        int64     `json:"id"`
+		Level     string    `json:"level"`
+		Message   string    `json:"message"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	for rows.Next() {
+		var log struct {
+			ID        int64     `json:"id"`
+			Level     string    `json:"level"`
+			Message   string    `json:"message"`
+			CreatedAt time.Time `json:"created_at"`
+		}
+		var id int64
+		var createdAt string
+		if err := rows.Scan(&id, &log.Level, &log.Message, &createdAt); err != nil {
+			return nil, fmt.Errorf("failed to scan log: %w", err)
+		}
+		log.ID = id
+		log.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		logs = append(logs, log)
+	}
+
+	return logs, nil
+}
+
+// CleanupOldLogs removes old log entries to maintain retention limit
+func (m *Manager) CleanupOldLogs(serviceID string, retention int) error {
+	if retention <= 0 {
+		retention = 10000
+	}
+
+	// Count total logs for service
+	var count int
+	err := m.db.QueryRow("SELECT COUNT(*) FROM service_logs WHERE service_id = ?", serviceID).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("failed to count logs: %w", err)
+	}
+
+	if count <= retention {
+		return nil
+	}
+
+	// Delete oldest logs, keeping retention count
+	deleteCount := count - retention + 1000 // Delete extra to avoid frequent cleanups
+	_, err = m.db.Exec(`
+		DELETE FROM service_logs 
+		WHERE id IN (
+			SELECT id FROM service_logs 
+			WHERE service_id = ? 
+			ORDER BY created_at ASC 
+			LIMIT ?
+		)
+	`, serviceID, deleteCount)
+
+	if err != nil {
+		return fmt.Errorf("failed to cleanup old logs: %w", err)
+	}
+
+	return nil
 }
