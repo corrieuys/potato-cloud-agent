@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	testAgentID           = "agent-123"
-	testAccessClientID    = "cf-client-id"
+	testAgentID            = "agent-123"
+	testAccessClientID     = "cf-client-id"
 	testAccessClientSecret = "cf-client-secret"
 )
 

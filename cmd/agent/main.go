@@ -45,10 +45,10 @@ func main() {
 		applyFirewall = flag.Bool("apply-firewall", false, "Apply firewall rules (requires root)")
 		showStatus    = flag.Bool("status", false, "Show current service status")
 
-		agentIDFlag          optionalString
-		stackIDFlag          optionalString
-		controlPlaneFlag     optionalString
-		accessClientIDFlag   optionalString
+		agentIDFlag            optionalString
+		stackIDFlag            optionalString
+		controlPlaneFlag       optionalString
+		accessClientIDFlag     optionalString
 		accessClientSecretFlag optionalString
 
 		// Secret management flags
@@ -89,7 +89,6 @@ func main() {
 		}
 		return
 	}
-
 
 	// Handle secret management commands
 	if *addSecret {
@@ -930,4 +929,3 @@ func handleShowLogs(configPath, serviceID string, follow bool) error {
 
 	return nil
 }
-

@@ -13,15 +13,15 @@ import (
 
 // Config holds the agent configuration.
 type Config struct {
-	AgentID           string `json:"agent_id"`
-	StackID           string `json:"stack_id"`
-	ControlPlane      string `json:"control_plane"`
-	PollInterval      int    `json:"poll_interval"`
-	DataDir           string `json:"data_dir"`
-	ExternalProxyPort int    `json:"external_proxy_port"`
-	SecurityMode      string `json:"security_mode"`
-	GitSSHKeyDir      string `json:"git_ssh_key_dir"`
-	AccessClientID    string `json:"access_client_id"`
+	AgentID            string `json:"agent_id"`
+	StackID            string `json:"stack_id"`
+	ControlPlane       string `json:"control_plane"`
+	PollInterval       int    `json:"poll_interval"`
+	DataDir            string `json:"data_dir"`
+	ExternalProxyPort  int    `json:"external_proxy_port"`
+	SecurityMode       string `json:"security_mode"`
+	GitSSHKeyDir       string `json:"git_ssh_key_dir"`
+	AccessClientID     string `json:"access_client_id"`
 	AccessClientSecret string `json:"access_client_secret"`
 
 	VerboseLogging bool `json:"verbose_logging"`
