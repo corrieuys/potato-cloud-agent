@@ -93,7 +93,7 @@ func TestGenerateDockerfile_NodeJS(t *testing.T) {
 		"NODE_ENV": "production",
 	}
 
-	content, err := gen.GenerateDockerfile("nodejs", "", 3000, envVars, tempDir)
+	content, err := gen.GenerateDockerfile("nodejs", "", 3000, envVars, "npm run build", "npm start", tempDir)
 	if err != nil {
 		t.Fatalf("Failed to generate Dockerfile: %v", err)
 	}
@@ -105,6 +105,9 @@ func TestGenerateDockerfile_NodeJS(t *testing.T) {
 	if !contains(content, "npm ci") {
 		t.Error("Expected 'npm ci' command")
 	}
+	if !contains(content, "RUN npm run build") {
+		t.Error("Expected build command")
+	}
 	if !contains(content, "ENV PORT=3000") {
 		t.Error("Expected PORT environment variable")
 	}
@@ -113,6 +116,9 @@ func TestGenerateDockerfile_NodeJS(t *testing.T) {
 	}
 	if !contains(content, "ENV NODE_ENV=production") {
 		t.Error("Expected NODE_ENV environment variable")
+	}
+	if !contains(content, "CMD [\"sh\", \"-c\", \"npm start\"]") {
+		t.Error("Expected run command")
 	}
 
 	t.Logf("✓ Generated correct Node.js Dockerfile")
@@ -124,7 +130,7 @@ func TestGenerateDockerfile_Go(t *testing.T) {
 	gen := NewGenerator(3000, 3100)
 	tempDir := t.TempDir()
 
-	content, err := gen.GenerateDockerfile("golang", "", 3001, nil, tempDir)
+	content, err := gen.GenerateDockerfile("golang", "", 3001, nil, "go build -o app", "./app", tempDir)
 	if err != nil {
 		t.Fatalf("Failed to generate Dockerfile: %v", err)
 	}
@@ -133,14 +139,14 @@ func TestGenerateDockerfile_Go(t *testing.T) {
 	if !contains(content, "FROM golang:1.23-alpine") {
 		t.Error("Expected base image 'golang:1.23-alpine'")
 	}
-	if !contains(content, "go mod download") {
-		t.Error("Expected 'go mod download' command")
-	}
-	if !contains(content, "go build") {
-		t.Error("Expected 'go build' command")
+	if !contains(content, "RUN go build -o app") {
+		t.Error("Expected build command")
 	}
 	if !contains(content, "ENV PORT=3001") {
 		t.Error("Expected PORT environment variable")
+	}
+	if !contains(content, "CMD [\"sh\", \"-c\", \"./app\"]") {
+		t.Error("Expected run command")
 	}
 
 	t.Logf("✓ Generated correct Go Dockerfile")
@@ -155,10 +161,6 @@ func TestGenerateDockerfile_Go(t *testing.T) {
 	if !contains(content, "COPY --from=builder") {
 		t.Error("Expected COPY --from=builder in multi-stage build")
 	}
-	if !contains(content, "CGO_ENABLED=0") {
-		t.Error("Expected CGO_ENABLED=0 for static binary")
-	}
-
 	t.Logf("✓ Multi-stage build correctly configured for Go")
 }
 
@@ -168,7 +170,7 @@ func TestGenerateDockerfile_Rust(t *testing.T) {
 	gen := NewGenerator(3000, 3100)
 	tempDir := t.TempDir()
 
-	content, err := gen.GenerateDockerfile("rust", "", 3002, nil, tempDir)
+	content, err := gen.GenerateDockerfile("rust", "", 3002, nil, "cargo build --release", "./app", tempDir)
 	if err != nil {
 		t.Fatalf("Failed to generate Dockerfile: %v", err)
 	}
@@ -177,11 +179,14 @@ func TestGenerateDockerfile_Rust(t *testing.T) {
 	if !contains(content, "FROM rust:1.75-slim") {
 		t.Error("Expected base image 'rust:1.75-slim'")
 	}
-	if !contains(content, "cargo build --release") {
-		t.Error("Expected 'cargo build --release' command")
+	if !contains(content, "RUN cargo build --release") {
+		t.Error("Expected build command")
 	}
 	if !contains(content, "ENV PORT=3002") {
 		t.Error("Expected PORT environment variable")
+	}
+	if !contains(content, "CMD [\"sh\", \"-c\", \"./app\"]") {
+		t.Error("Expected run command")
 	}
 
 	// Verify multi-stage aspects
@@ -194,8 +199,8 @@ func TestGenerateDockerfile_Rust(t *testing.T) {
 	if !contains(content, "COPY --from=builder") {
 		t.Error("Expected COPY --from=builder in multi-stage build")
 	}
-	if !contains(content, "/app/target/release/app") {
-		t.Error("Expected copy from target/release directory")
+	if !contains(content, "COPY --from=builder /app /app") {
+		t.Error("Expected copy of build output into runtime image")
 	}
 
 	t.Logf("✓ Multi-stage build correctly configured for Rust")
@@ -208,7 +213,7 @@ func TestGenerateDockerfile_BaseImageOverride(t *testing.T) {
 	tempDir := t.TempDir()
 
 	customImage := "node:18-slim"
-	content, err := gen.GenerateDockerfile("nodejs", customImage, 3000, nil, tempDir)
+	content, err := gen.GenerateDockerfile("nodejs", customImage, 3000, nil, "npm run build", "npm start", tempDir)
 	if err != nil {
 		t.Fatalf("Failed to generate Dockerfile: %v", err)
 	}

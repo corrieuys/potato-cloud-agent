@@ -128,23 +128,36 @@ Generated Dockerfiles:
 
 ### Quick Install (Recommended)
 
-Get your install token from the Potato Cloud dashboard, then run:
+Get your agent setup command from the Potato Cloud dashboard, then run:
 
 ```bash
-curl -fsSL https://potatocloud.space/install.sh | sudo bash -s -- --token <INSTALL_TOKEN> --stack-id <STACK_ID> --control-plane https://your-control-plane.workers.dev
+curl -fsSL https://your-domain.com/install.sh | sudo bash -s -- --agent-id <AGENT_ID> --stack-id <STACK_ID> --control-plane https://your-control-plane.workers.dev --access-client-id <CF_ACCESS_CLIENT_ID> --access-client-secret <CF_ACCESS_CLIENT_SECRET>
 ```
 
 The install script will:
 - Download prebuilt agent binary
-- Register with the control plane
+- Write the agent config with Cloudflare Access credentials
 - Create necessary directories
 - Start as a systemd service
+
+### Cloudflare Access Setup
+
+Potato Cloud uses Cloudflare Access for agent authentication and recommends Cloudflare Tunnel for inbound traffic.
+
+1. Cloudflare Zero Trust → Access → Service Tokens → Create token
+2. Add the token to the Access policy protecting the control plane
+3. Copy the Client ID and Client Secret for use in the agent setup command
+
+Suggested implementation:
+- Protect the control plane with an Access app and a service-token policy
+- Use Cloudflare Tunnel for HTTPS ingress to services (no open inbound ports)
+- Rotate service tokens periodically and keep them out of logs
 
 **Optional flags:**
 - `--version <tag>`: Install specific version
 - `--control-plane <url>`: Override control plane URL
-- `--stack-id <id>`: Stack ID for registration endpoint
-- `--force-register`: Re-register even if already configured
+- `--stack-id <id>`: Stack ID
+- `--force-config`: Rewrite config even if already configured
 
 ### Manual Build
 
@@ -156,13 +169,16 @@ CGO_ENABLED=1 go build -o potato-cloud-agent ./cmd/agent
 sudo mv potato-cloud-agent /usr/local/bin/
 ```
 
-### Manual Registration
+### Manual Configuration
 
 ```bash
-sudo potato-cloud-agent -register <INSTALL_TOKEN> \
+sudo potato-cloud-agent \
+  -config /etc/potato-cloud/config.json \
+  -agent-id <AGENT_ID> \
   -stack-id <STACK_ID> \
   -control-plane https://your-control-plane.workers.dev \
-  -config /etc/potato-cloud/config.json
+  -access-client-id <CF_ACCESS_CLIENT_ID> \
+  -access-client-secret <CF_ACCESS_CLIENT_SECRET>
 ```
 
 ## Configuration
@@ -171,10 +187,11 @@ Configuration is stored in `/etc/potato-cloud/config.json`:
 
 ```json
 {
-  "agent_id": "uuid-generated-on-registration",
-  "api_key": "secret-key-for-control-plane",
+  "agent_id": "agent-id-from-control-plane",
   "stack_id": "uuid-of-your-stack",
   "control_plane": "https://your-control-plane.workers.dev",
+  "access_client_id": "cloudflare-access-client-id",
+  "access_client_secret": "cloudflare-access-client-secret",
   "poll_interval": 30,
   "data_dir": "/var/lib/potato-cloud",
   "external_proxy_port": 8080,
@@ -191,10 +208,11 @@ Configuration is stored in `/etc/potato-cloud/config.json`:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `agent_id` | Unique agent identifier (auto-generated) | - |
-| `api_key` | Authentication key for control plane | - |
+| `agent_id` | Unique agent identifier (from control plane) | - |
 | `stack_id` | Stack this agent belongs to | - |
 | `control_plane` | Control plane URL | - |
+| `access_client_id` | Cloudflare Access client ID | - |
+| `access_client_secret` | Cloudflare Access client secret | - |
 | `poll_interval` | Config check interval (seconds) | 30 |
 | `data_dir` | Data storage directory | `/var/lib/potato-cloud` |
 | `external_proxy_port` | HTTP proxy port | 8080 |

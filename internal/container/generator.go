@@ -68,9 +68,11 @@ var LanguageConfigs = map[string]LanguageConfig{
 
 // TemplateData holds the data for Dockerfile template
 type TemplateData struct {
-	BaseImage string
-	Port      int
-	EnvVars   map[string]string
+	BaseImage    string
+	Port         int
+	EnvVars      map[string]string
+	BuildCommand string
+	RunCommand   string
 }
 
 // DetectLanguage automatically detects the language/runtime from repository files
@@ -86,9 +88,12 @@ func (g *Generator) DetectLanguage(repoPath string) string {
 }
 
 // GenerateDockerfile creates a Dockerfile for the given service
-func (g *Generator) GenerateDockerfile(language, baseImage string, port int, envVars map[string]string, repoPath string) (string, error) {
+func (g *Generator) GenerateDockerfile(language, baseImage string, port int, envVars map[string]string, buildCommand, runCommand, repoPath string) (string, error) {
 	if language == "" || language == "auto" {
 		language = g.DetectLanguage(repoPath)
+	}
+	if strings.TrimSpace(buildCommand) == "" || strings.TrimSpace(runCommand) == "" {
+		return "", fmt.Errorf("build_command and run_command are required for generated Dockerfiles")
 	}
 
 	config, ok := LanguageConfigs[language]
@@ -102,9 +107,11 @@ func (g *Generator) GenerateDockerfile(language, baseImage string, port int, env
 	}
 
 	data := TemplateData{
-		BaseImage: baseImage,
-		Port:      port,
-		EnvVars:   envVars,
+		BaseImage:    baseImage,
+		Port:         port,
+		EnvVars:      envVars,
+		BuildCommand: buildCommand,
+		RunCommand:   runCommand,
 	}
 
 	tmpl, err := template.New("dockerfile").Parse(config.Template)

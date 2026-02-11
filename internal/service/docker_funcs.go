@@ -242,13 +242,16 @@ func IsStackNetworkCreated(stackID string) bool {
 }
 
 // cleanupOldImages removes old Docker images for a service.
-func (m *Manager) cleanupOldImages(serviceID string) {
+func (m *Manager) cleanupOldImages(serviceID string, keep int) {
 	images, err := listImages(serviceID)
 	if err != nil {
 		m.logVerbose("Failed to list images for cleanup: %v", err)
 		return
 	}
-	if len(images) <= imageRetentionCountDefault {
+	if keep <= 0 {
+		keep = imageRetentionCountDefault
+	}
+	if len(images) <= keep {
 		return
 	}
 
@@ -261,7 +264,7 @@ func (m *Manager) cleanupOldImages(serviceID string) {
 		return iTime.After(jTime)
 	})
 
-	for _, img := range images[imageRetentionCountDefault:] {
+	for _, img := range images[keep:] {
 		m.logVerbose("Removing old image: %s", img.Tag)
 		if err := removeImage(img.ID); err != nil {
 			m.logVerbose("Failed to remove image %s: %v", img.Tag, err)

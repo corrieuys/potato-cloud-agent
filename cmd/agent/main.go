@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -23,17 +22,34 @@ import (
 	"github.com/buildvigil/agent/internal/tunnel"
 )
 
+type optionalString struct {
+	value string
+	set   bool
+}
+
+func (o *optionalString) String() string {
+	return o.value
+}
+
+func (o *optionalString) Set(value string) error {
+	o.value = value
+	o.set = true
+	return nil
+}
+
 func main() {
 	var (
-		registerToken = flag.String("register", "", "Install token for initial registration")
 		genSSHKey     = flag.Bool("gen-ssh-key", false, "Generate an SSH keypair for git access")
 		sshKeyName    = flag.String("ssh-key-name", "default", "SSH key name to generate (filename under ssh dir)")
 		configPath    = flag.String("config", config.ConfigPath(), "Path to config file")
-		controlPlane  = flag.String("control-plane", "http://localhost:8787", "Control plane URL")
-		stackID       = flag.String("stack-id", "", "Stack ID (required for registration)")
-		setAPIKey     = flag.String("set-api-key", "", "Update stored API key in agent config")
 		applyFirewall = flag.Bool("apply-firewall", false, "Apply firewall rules (requires root)")
 		showStatus    = flag.Bool("status", false, "Show current service status")
+
+		agentIDFlag          optionalString
+		stackIDFlag          optionalString
+		controlPlaneFlag     optionalString
+		accessClientIDFlag   optionalString
+		accessClientSecretFlag optionalString
 
 		// Secret management flags
 		addSecret     = flag.Bool("add-secret", false, "Add a new secret")
@@ -48,15 +64,13 @@ func main() {
 		followLogs = flag.Bool("f", false, "Follow logs in real-time (tail -f style)")
 		logService = flag.String("log-service", "", "Service ID for log viewing")
 	)
-	flag.Parse()
 
-	if *registerToken != "" {
-		if err := doRegistration(*controlPlane, *stackID, *registerToken, *configPath); err != nil {
-			log.Fatalf("Registration failed: %v", err)
-		}
-		fmt.Println("Registration successful. Agent is configured.")
-		return
-	}
+	flag.Var(&agentIDFlag, "agent-id", "Agent ID")
+	flag.Var(&stackIDFlag, "stack-id", "Stack ID")
+	flag.Var(&controlPlaneFlag, "control-plane", "Control plane URL")
+	flag.Var(&accessClientIDFlag, "access-client-id", "Cloudflare Access client ID")
+	flag.Var(&accessClientSecretFlag, "access-client-secret", "Cloudflare Access client secret")
+	flag.Parse()
 
 	if *genSSHKey {
 		cfg := config.DefaultConfig()
@@ -76,12 +90,6 @@ func main() {
 		return
 	}
 
-	if *setAPIKey != "" {
-		if err := handleSetAPIKey(*configPath, *setAPIKey); err != nil {
-			log.Fatalf("Failed to update API key: %v", err)
-		}
-		return
-	}
 
 	// Handle secret management commands
 	if *addSecret {
@@ -119,6 +127,10 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	if err := applyConfigOverrides(cfg, *configPath, agentIDFlag, stackIDFlag, controlPlaneFlag, accessClientIDFlag, accessClientSecretFlag); err != nil {
+		log.Fatalf("Failed to apply config overrides: %v", err)
+	}
+
 	// Ensure data directories exist
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
@@ -154,7 +166,7 @@ func main() {
 	dnsMgr := proxy.NewDNSManager()
 
 	// Initialize API client
-	apiClient := api.NewClient(cfg.ControlPlane, cfg.APIKey)
+	apiClient := api.NewClient(cfg.ControlPlane, cfg.AgentID, cfg.AccessClientID, cfg.AccessClientSecret)
 
 	// Initialize firewall manager (will be configured after first sync)
 	var fwMgr *firewall.Manager
@@ -206,63 +218,39 @@ func main() {
 	agent.Stop()
 }
 
-// doRegistration handles the initial agent registration
-func doRegistration(controlPlane, stackID, installToken, configPath string) error {
-	if strings.TrimSpace(stackID) == "" {
-		return fmt.Errorf("stack ID is required (use -stack-id)")
+func applyConfigOverrides(cfg *config.Config, configPath string, agentID, stackID, controlPlane, accessClientID, accessClientSecret optionalString) error {
+	changed := false
+
+	if agentID.set {
+		cfg.AgentID = strings.TrimSpace(agentID.value)
+		changed = true
+	}
+	if stackID.set {
+		cfg.StackID = strings.TrimSpace(stackID.value)
+		changed = true
+	}
+	if controlPlane.set {
+		cfg.ControlPlane = strings.TrimSpace(controlPlane.value)
+		changed = true
+	}
+	if accessClientID.set {
+		cfg.AccessClientID = strings.TrimSpace(accessClientID.value)
+		changed = true
+	}
+	if accessClientSecret.set {
+		cfg.AccessClientSecret = strings.TrimSpace(accessClientSecret.value)
+		changed = true
 	}
 
-	// Get system info
-	hostname, _ := os.Hostname()
-	ipAddress := getLocalIP()
-
-	// Register with control plane
-	req := api.RegistrationRequest{
-		InstallToken: installToken,
-		Hostname:     hostname,
-		IPAddress:    ipAddress,
-	}
-
-	resp, err := api.Register(controlPlane, stackID, req)
-	if err != nil {
-		return fmt.Errorf("registration failed: %w", err)
-	}
-
-	// Save configuration
-	cfg := &config.Config{
-		AgentID:           resp.AgentID,
-		APIKey:            resp.APIKey,
-		StackID:           resp.StackID,
-		ControlPlane:      controlPlane,
-		PollInterval:      resp.PollInterval,
-		DataDir:           "/var/lib/potato-cloud",
-		ExternalProxyPort: 8080,
-		SecurityMode:      "none",
+	if !changed {
+		return nil
 	}
 
 	if err := cfg.Save(configPath); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return err
 	}
 
 	return nil
-}
-
-// getLocalIP returns the local IP address
-func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return ""
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
-			}
-		}
-	}
-
-	return ""
 }
 
 // Agent is the main agent structure
@@ -943,24 +931,3 @@ func handleShowLogs(configPath, serviceID string, follow bool) error {
 	return nil
 }
 
-// handleSetAPIKey updates the stored API key in the agent config file.
-func handleSetAPIKey(configPath, apiKey string) error {
-	apiKey = strings.TrimSpace(apiKey)
-	if apiKey == "" {
-		return fmt.Errorf("API key cannot be empty")
-	}
-
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	cfg.APIKey = apiKey
-	if err := cfg.Save(configPath); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	fmt.Println("✓ API key updated in config")
-	fmt.Println("Note: Restart the agent service to apply the new key.")
-	return nil
-}

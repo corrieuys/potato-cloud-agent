@@ -10,19 +10,35 @@ import (
 
 // Client communicates with the control plane
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL            string
+	agentID            string
+	accessClientID     string
+	accessClientSecret string
+	httpClient         *http.Client
 }
 
 // NewClient creates a new API client
-func NewClient(baseURL, apiKey string) *Client {
+func NewClient(baseURL, agentID, accessClientID, accessClientSecret string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL:            baseURL,
+		agentID:            agentID,
+		accessClientID:     accessClientID,
+		accessClientSecret: accessClientSecret,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+	}
+}
+
+func (c *Client) setAccessHeaders(req *http.Request) {
+	if c.agentID != "" {
+		req.Header.Set("X-Agent-Id", c.agentID)
+	}
+	if c.accessClientID != "" {
+		req.Header.Set("CF-Access-Client-Id", c.accessClientID)
+	}
+	if c.accessClientSecret != "" {
+		req.Header.Set("CF-Access-Client-Secret", c.accessClientSecret)
 	}
 }
 
@@ -45,8 +61,16 @@ type Service struct {
 	GitRef              string            `json:"git_ref"`
 	GitCommit           string            `json:"git_commit"`
 	GitSSHKey           string            `json:"git_ssh_key"`
+	BuildCommand        string            `json:"build_command"`
+	RunCommand          string            `json:"run_command"`
+	Runtime             string            `json:"runtime"`
+	DockerfilePath      string            `json:"dockerfile_path"`
+	DockerContext       string            `json:"docker_context"`
+	DockerContainerPort int               `json:"docker_container_port"`
+	ImageRetainCount    int               `json:"image_retain_count"`
 	BaseImage           string            `json:"base_image"` // Optional: override default base image
 	Language            string            `json:"language"`   // Language/runtime: nodejs, golang, python, rust, java, generic, auto
+	Port                int               `json:"port"`
 	ExternalPath        string            `json:"external_path"`
 	HealthCheckPath     string            `json:"health_check_path"`
 	HealthCheckInterval int               `json:"health_check_interval"` // Defaults to global config
@@ -73,7 +97,7 @@ func (c *Client) GetDesiredState(stackID string) (*DesiredState, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-API-Key", c.apiKey)
+	c.setAccessHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -91,53 +115,6 @@ func (c *Client) GetDesiredState(stackID string) (*DesiredState, error) {
 	}
 
 	return &state, nil
-}
-
-// RegistrationRequest represents a request to register a new agent
-type RegistrationRequest struct {
-	InstallToken string `json:"install_token"`
-	Hostname     string `json:"hostname"`
-	IPAddress    string `json:"ip_address"`
-}
-
-// RegistrationResponse represents the response from registration
-type RegistrationResponse struct {
-	AgentID      string `json:"agent_id"`
-	APIKey       string `json:"api_key"`
-	StackID      string `json:"stack_id"`
-	PollInterval int    `json:"poll_interval"`
-}
-
-// Register exchanges an install token for permanent credentials.
-// stackID is required for stack-scoped registration endpoints.
-func Register(baseURL, stackID string, req RegistrationRequest) (*RegistrationResponse, error) {
-	if stackID == "" {
-		return nil, fmt.Errorf("stack ID is required for registration")
-	}
-
-	url := fmt.Sprintf("%s/api/stacks/%s/agents/register", baseURL, stackID)
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to register: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("registration failed with status: %d", resp.StatusCode)
-	}
-
-	var result RegistrationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &result, nil
 }
 
 // HeartbeatRequest represents a heartbeat payload
@@ -175,7 +152,7 @@ func (c *Client) SendHeartbeat(req HeartbeatRequest) error {
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-API-Key", c.apiKey)
+	c.setAccessHeaders(httpReq)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {

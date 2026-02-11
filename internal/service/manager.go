@@ -97,7 +97,14 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 
 	env := m.prepareEnvironment(service)
 
-	containerID, err := m.startContainer(containerName, imageID, port, env, nil)
+	containerPort := service.DockerContainerPort
+	if containerPort == 0 {
+		containerPort = service.Port
+	}
+	if containerPort == 0 {
+		containerPort = 8000
+	}
+	containerID, err := m.startContainer(containerName, imageID, port, containerPort, env, nil)
 	if err != nil {
 		m.portMgr.Release(service.ID)
 		return fmt.Errorf("failed to start container: %w", err)
@@ -147,7 +154,14 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 
 	env := m.prepareEnvironment(service)
 	greenContainerName := containerName + "-green"
-	greenContainerID, err := m.startContainer(greenContainerName, imageID, greenPort, env, nil)
+	containerPort := service.DockerContainerPort
+	if containerPort == 0 {
+		containerPort = service.Port
+	}
+	if containerPort == 0 {
+		containerPort = 8000
+	}
+	greenContainerID, err := m.startContainer(greenContainerName, imageID, greenPort, containerPort, env, nil)
 	if err != nil {
 		return fmt.Errorf("failed to start green container: %w", err)
 	}
@@ -196,21 +210,53 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 
 func (m *Manager) buildServiceImage(service api.Service, imageTag string) (string, error) {
 	repoPath := filepath.Join(m.reposPath, service.ID)
-	dockerfilePath, exists := m.generator.CheckDockerfileExists(repoPath)
+	contextPath := repoPath
+	if strings.TrimSpace(service.DockerContext) != "" {
+		if filepath.IsAbs(service.DockerContext) {
+			contextPath = service.DockerContext
+		} else {
+			contextPath = filepath.Join(repoPath, service.DockerContext)
+		}
+	}
+
+	dockerfilePath := ""
+	exists := false
+	if strings.TrimSpace(service.DockerfilePath) != "" {
+		if filepath.IsAbs(service.DockerfilePath) {
+			dockerfilePath = service.DockerfilePath
+		} else {
+			dockerfilePath = filepath.Join(contextPath, service.DockerfilePath)
+		}
+		if _, err := os.Stat(dockerfilePath); err != nil {
+			return "", fmt.Errorf("dockerfile_path not found: %w", err)
+		}
+		exists = true
+	} else {
+		dockerfilePath, exists = m.generator.CheckDockerfileExists(contextPath)
+	}
 	generatedDockerfile := false
+	containerPort := service.DockerContainerPort
+	if containerPort == 0 {
+		containerPort = service.Port
+	}
+	if containerPort == 0 {
+		containerPort = 8000
+	}
 	if !exists {
 		dockerfileContent, err := m.generator.GenerateDockerfile(
 			service.Language,
 			service.BaseImage,
-			8000,
+			containerPort,
 			service.EnvironmentVars,
-			repoPath,
+			service.BuildCommand,
+			service.RunCommand,
+			contextPath,
 		)
 		if err != nil {
 			return "", fmt.Errorf("failed to generate Dockerfile: %w", err)
 		}
 
-		dockerfilePath, err = m.generator.WriteDockerfile(dockerfileContent, repoPath)
+		dockerfilePath, err = m.generator.WriteDockerfile(dockerfileContent, contextPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to write Dockerfile: %w", err)
 		}
@@ -222,7 +268,7 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 		}()
 	}
 
-	buildCmd := exec.Command("docker", "build", "-t", imageTag, "-f", dockerfilePath, repoPath)
+	buildCmd := exec.Command("docker", "build", "-t", imageTag, "-f", dockerfilePath, contextPath)
 	if m.verbose {
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
@@ -236,7 +282,13 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 	if err != nil {
 		return "", fmt.Errorf("failed to inspect image: %w", err)
 	}
-	return strings.TrimSpace(string(output)), nil
+	imageID := strings.TrimSpace(string(output))
+	retention := service.ImageRetainCount
+	if retention <= 0 {
+		retention = imageRetentionCountDefault
+	}
+	m.cleanupOldImages(service.ID, retention)
+	return imageID, nil
 }
 
 func (m *Manager) prepareEnvironment(service api.Service) []string {
@@ -247,8 +299,8 @@ func (m *Manager) prepareEnvironment(service api.Service) []string {
 	return env
 }
 
-func (m *Manager) startContainer(name, imageID string, port int, env []string, command []string) (string, error) {
-	portBinding := fmt.Sprintf("%d:%d", port, 8000)
+func (m *Manager) startContainer(name, imageID string, hostPort int, containerPort int, env []string, command []string) (string, error) {
+	portBinding := fmt.Sprintf("%d:%d", hostPort, containerPort)
 	args := []string{"run", "-d", "--name", name, "-p", portBinding}
 
 	for _, e := range env {

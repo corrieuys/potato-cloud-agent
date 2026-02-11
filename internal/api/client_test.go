@@ -7,10 +7,15 @@ import (
 	"testing"
 )
 
+const (
+	testAgentID           = "agent-123"
+	testAccessClientID    = "cf-client-id"
+	testAccessClientSecret = "cf-client-secret"
+)
+
 func TestGetDesiredState_Success(t *testing.T) {
 	t.Logf("Testing GetDesiredState success")
 
-	// Create test server
 	expectedState := &DesiredState{
 		StackID:           "stack-123",
 		Version:           42,
@@ -36,34 +41,35 @@ func TestGetDesiredState_Success(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
 		if r.Method != "GET" {
 			t.Errorf("Expected GET request, got %s", r.Method)
 		}
 		if r.URL.Path != "/api/stacks/stack-123/desired-state" {
 			t.Errorf("Expected path /api/stacks/stack-123/desired-state, got %s", r.URL.Path)
 		}
-		if r.Header.Get("X-API-Key") != "test-api-key" {
-			t.Errorf("Expected API key header 'test-api-key', got '%s'", r.Header.Get("X-API-Key"))
+		if r.Header.Get("X-Agent-Id") != testAgentID {
+			t.Errorf("Expected agent header '%s', got '%s'", testAgentID, r.Header.Get("X-Agent-Id"))
+		}
+		if r.Header.Get("CF-Access-Client-Id") != testAccessClientID {
+			t.Errorf("Expected CF Access client ID '%s', got '%s'", testAccessClientID, r.Header.Get("CF-Access-Client-Id"))
+		}
+		if r.Header.Get("CF-Access-Client-Secret") != testAccessClientSecret {
+			t.Errorf("Expected CF Access client secret '%s', got '%s'", testAccessClientSecret, r.Header.Get("CF-Access-Client-Secret"))
 		}
 
-		// Send response
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(expectedState)
 	}))
 	defer server.Close()
 
-	// Create client
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL, testAgentID, testAccessClientID, testAccessClientSecret)
 
-	// Call method
 	state, err := client.GetDesiredState("stack-123")
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
 
-	// Verify response
 	if state.StackID != expectedState.StackID {
 		t.Errorf("Expected StackID '%s', got '%s'", expectedState.StackID, state.StackID)
 	}
@@ -92,7 +98,7 @@ func TestGetDesiredState_HTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL, testAgentID, testAccessClientID, testAccessClientSecret)
 
 	_, err := client.GetDesiredState("stack-123")
 	if err == nil {
@@ -112,7 +118,7 @@ func TestGetDesiredState_InvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL, testAgentID, testAccessClientID, testAccessClientSecret)
 
 	_, err := client.GetDesiredState("stack-123")
 	if err == nil {
@@ -128,33 +134,36 @@ func TestSendHeartbeat_Success(t *testing.T) {
 	var receivedHeartbeat *HeartbeatRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
 		if r.Method != "POST" {
 			t.Errorf("Expected POST request, got %s", r.Method)
 		}
 		if r.URL.Path != "/api/agents/heartbeat" {
 			t.Errorf("Expected path /api/agents/heartbeat, got %s", r.URL.Path)
 		}
-		if r.Header.Get("X-API-Key") != "test-api-key" {
-			t.Errorf("Expected API key header 'test-api-key', got '%s'", r.Header.Get("X-API-Key"))
+		if r.Header.Get("X-Agent-Id") != testAgentID {
+			t.Errorf("Expected agent header '%s', got '%s'", testAgentID, r.Header.Get("X-Agent-Id"))
+		}
+		if r.Header.Get("CF-Access-Client-Id") != testAccessClientID {
+			t.Errorf("Expected CF Access client ID '%s', got '%s'", testAccessClientID, r.Header.Get("CF-Access-Client-Id"))
+		}
+		if r.Header.Get("CF-Access-Client-Secret") != testAccessClientSecret {
+			t.Errorf("Expected CF Access client secret '%s', got '%s'", testAccessClientSecret, r.Header.Get("CF-Access-Client-Secret"))
 		}
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("Expected Content-Type 'application/json', got '%s'", r.Header.Get("Content-Type"))
 		}
 
-		// Decode request body
 		var hb HeartbeatRequest
 		if err := json.NewDecoder(r.Body).Decode(&hb); err != nil {
 			t.Errorf("Failed to decode heartbeat: %v", err)
 		}
 		receivedHeartbeat = &hb
 
-		// Send response
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL, testAgentID, testAccessClientID, testAccessClientSecret)
 
 	req := HeartbeatRequest{
 		StackVersion: 42,
@@ -180,7 +189,6 @@ func TestSendHeartbeat_Success(t *testing.T) {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
 
-	// Verify received heartbeat
 	if receivedHeartbeat == nil {
 		t.Fatal("Server did not receive heartbeat")
 	}
@@ -206,7 +214,7 @@ func TestSendHeartbeat_HTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL, testAgentID, testAccessClientID, testAccessClientSecret)
 
 	req := HeartbeatRequest{
 		StackVersion: 42,
@@ -219,99 +227,4 @@ func TestSendHeartbeat_HTTPError(t *testing.T) {
 	}
 
 	t.Logf("✓ SendHeartbeat correctly returned error for HTTP 503")
-}
-
-func TestRegister_Success(t *testing.T) {
-	t.Logf("Testing Register success")
-
-	expectedResponse := &RegistrationResponse{
-		AgentID:      "agent-123",
-		APIKey:       "new-api-key",
-		StackID:      "stack-456",
-		PollInterval: 30,
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
-		if r.Method != "POST" {
-			t.Errorf("Expected POST request, got %s", r.Method)
-		}
-		if r.URL.Path != "/api/stacks/stack-456/agents/register" {
-			t.Errorf("Expected path /api/stacks/stack-456/agents/register, got %s", r.URL.Path)
-		}
-
-		// Decode request
-		var req RegistrationRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("Failed to decode request: %v", err)
-		}
-		if req.InstallToken != "install-token-123" {
-			t.Errorf("Expected InstallToken 'install-token-123', got '%s'", req.InstallToken)
-		}
-
-		// Send response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(expectedResponse)
-	}))
-	defer server.Close()
-
-	req := RegistrationRequest{
-		InstallToken: "install-token-123",
-		Hostname:     "test-host",
-		IPAddress:    "192.168.1.1",
-	}
-
-	resp, err := Register(server.URL, "stack-456", req)
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
-
-	if resp.AgentID != expectedResponse.AgentID {
-		t.Errorf("Expected AgentID '%s', got '%s'", expectedResponse.AgentID, resp.AgentID)
-	}
-	if resp.APIKey != expectedResponse.APIKey {
-		t.Errorf("Expected APIKey '%s', got '%s'", expectedResponse.APIKey, resp.APIKey)
-	}
-	if resp.StackID != expectedResponse.StackID {
-		t.Errorf("Expected StackID '%s', got '%s'", expectedResponse.StackID, resp.StackID)
-	}
-
-	t.Logf("✓ Register returned correct data")
-}
-
-func TestRegister_HTTPError(t *testing.T) {
-	t.Logf("Testing Register HTTP error")
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("Invalid install token"))
-	}))
-	defer server.Close()
-
-	req := RegistrationRequest{
-		InstallToken: "invalid-token",
-	}
-
-	_, err := Register(server.URL, "stack-456", req)
-	if err == nil {
-		t.Fatal("Expected error for HTTP 401, got nil")
-	}
-
-	t.Logf("✓ Register correctly returned error for HTTP 401")
-}
-
-func TestRegister_MissingStackID(t *testing.T) {
-	t.Logf("Testing Register missing stack ID")
-
-	req := RegistrationRequest{
-		InstallToken: "install-token-123",
-	}
-
-	_, err := Register("https://example.com", "", req)
-	if err == nil {
-		t.Fatal("Expected error when stack ID is missing")
-	}
-
-	t.Logf("✓ Register correctly returned error for missing stack ID")
 }
