@@ -75,7 +75,7 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	auth, err := m.authForKey(sshKeyName)
+	auth, err := m.authForRepo(gitURL, sshKeyName)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	auth, err := m.authForKey(sshKeyName)
+	auth, err := m.authForRepo(repoConfigURL(repo), sshKeyName)
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +127,7 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	auth, err := m.authForKey(sshKeyName)
+	auth, err := m.authForRepo(repoConfigURL(repo), sshKeyName)
 	if err != nil {
 		return "", err
 	}
@@ -167,8 +167,11 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 	return head.Hash().String(), nil
 }
 
-func (m *Manager) authForKey(keyName string) (*gitssh.PublicKeys, error) {
+func (m *Manager) authForRepo(gitURL, keyName string) (*gitssh.PublicKeys, error) {
 	if keyName == "" {
+		return nil, nil
+	}
+	if !isSSHGitURL(gitURL) {
 		return nil, nil
 	}
 
@@ -200,6 +203,26 @@ func (m *Manager) authForKey(keyName string) (*gitssh.PublicKeys, error) {
 	keys.HostKeyCallback = callback
 
 	return keys, nil
+}
+
+func isSSHGitURL(gitURL string) bool {
+	trimmed := strings.TrimSpace(gitURL)
+	return strings.HasPrefix(trimmed, "git@") ||
+		strings.HasPrefix(trimmed, "ssh://") ||
+		strings.HasPrefix(trimmed, "git+ssh://")
+}
+
+func repoConfigURL(repo *git.Repository) string {
+	config, err := repo.Config()
+	if err != nil {
+		return ""
+	}
+	if origin, ok := config.Remotes["origin"]; ok {
+		if len(origin.URLs) > 0 {
+			return origin.URLs[0]
+		}
+	}
+	return ""
 }
 
 // GetRepoPath returns the filesystem path for a service's repository
