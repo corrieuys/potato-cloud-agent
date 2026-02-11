@@ -147,6 +147,25 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 		port:          port,
 	}
 
+	if err := m.state.SaveServiceProcess(&state.ServiceProcess{
+		ServiceID:     service.ID,
+		ServiceName:   service.Name,
+		GitCommit:     service.GitCommit,
+		Runtime:       "docker",
+		ContainerID:   containerID,
+		ContainerName: containerName,
+		ImageTag:      imageTag,
+		Port:          portPair.BluePort,
+		GreenPort:     portPair.GreenPort,
+		ActivePort:    port,
+		BaseImage:     service.BaseImage,
+		Language:      service.Language,
+		Status:        "running",
+		StartedAt:     time.Now().UTC(),
+	}); err != nil {
+		m.logVerbose("Failed to persist service state for %s: %v", service.ID, err)
+	}
+
 	m.logVerbose("Service %s deployed successfully on port %d", service.ID, port)
 	log.Printf("[ServiceManager] Initial deploy complete: service=%s hostPort=%d elapsed=%s", service.ID, port, time.Since(start))
 	return nil
@@ -220,6 +239,25 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		containerName: activeContainerName,
 		imageTag:      imageTag,
 		port:          greenPort,
+	}
+
+	if err := m.state.SaveServiceProcess(&state.ServiceProcess{
+		ServiceID:     service.ID,
+		ServiceName:   service.Name,
+		GitCommit:     service.GitCommit,
+		Runtime:       "docker",
+		ContainerID:   greenContainerID,
+		ContainerName: activeContainerName,
+		ImageTag:      imageTag,
+		Port:          portPair.BluePort,
+		GreenPort:     portPair.GreenPort,
+		ActivePort:    greenPort,
+		BaseImage:     service.BaseImage,
+		Language:      service.Language,
+		Status:        "running",
+		StartedAt:     time.Now().UTC(),
+	}); err != nil {
+		m.logVerbose("Failed to persist service state for %s: %v", service.ID, err)
 	}
 
 	m.logVerbose("Blue/green deployment completed for service %s, now on port %d", service.ID, greenPort)
@@ -450,7 +488,17 @@ func (m *Manager) StopService(serviceID string) error {
 
 	info, exists := m.containers[serviceID]
 	if !exists {
-		return fmt.Errorf("service %s not found", serviceID)
+		proc, err := m.state.GetServiceProcess(serviceID)
+		if err != nil || proc == nil {
+			return fmt.Errorf("service %s not found", serviceID)
+		}
+		info = &containerInfo{
+			containerName: proc.ContainerName,
+			port:          proc.ActivePort,
+		}
+		if info.containerName == "" {
+			info.containerName = fmt.Sprintf("%s-%s", ContainerPrefix, serviceID)
+		}
 	}
 
 	if err := m.stopContainer(info.containerName); err != nil {
@@ -460,9 +508,120 @@ func (m *Manager) StopService(serviceID string) error {
 	_ = DisconnectContainerFromStackNetwork(info.containerName, serviceID)
 	m.portMgr.Release(serviceID)
 	delete(m.containers, serviceID)
+	if err := m.state.DeleteServiceProcess(serviceID); err != nil {
+		m.logVerbose("Failed to delete service state for %s: %v", serviceID, err)
+	}
 
 	m.logVerbose("Service %s stopped successfully", serviceID)
 	return nil
+}
+
+// RecoverService attempts to restore in-memory tracking for a running container.
+func (m *Manager) RecoverService(service api.Service) (int, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if info, ok := m.containers[service.ID]; ok && info.port > 0 {
+		return info.port, true, nil
+	}
+
+	proc, err := m.state.GetServiceProcess(service.ID)
+	if err != nil {
+		return 0, false, err
+	}
+
+	containerName := fmt.Sprintf("%s-%s", ContainerPrefix, service.ID)
+	imageTag := fmt.Sprintf("%s-%s:latest", ImagePrefix, service.ID)
+	activePort := 0
+	bluePort := 0
+	greenPort := 0
+	imageTagFromState := ""
+
+	if proc != nil {
+		if proc.ContainerName != "" {
+			containerName = proc.ContainerName
+		}
+		if proc.ImageTag != "" {
+			imageTagFromState = proc.ImageTag
+		}
+		if proc.ActivePort > 0 {
+			activePort = proc.ActivePort
+		}
+		if proc.Port > 0 {
+			bluePort = proc.Port
+		}
+		if proc.GreenPort > 0 {
+			greenPort = proc.GreenPort
+		}
+	}
+
+	status, err := getContainerStatus(containerName)
+	if err != nil {
+		return 0, false, err
+	}
+	if status != "running" {
+		return 0, false, nil
+	}
+
+	containerPort := service.DockerContainerPort
+	if containerPort == 0 {
+		containerPort = service.Port
+	}
+	if containerPort == 0 {
+		containerPort = 8000
+	}
+
+	if activePort == 0 {
+		mappedPort, mapErr := getMappedHostPort(containerName, containerPort)
+		if mapErr != nil {
+			return 0, false, mapErr
+		}
+		activePort = mappedPort
+	}
+	if activePort == 0 {
+		return 0, false, nil
+	}
+
+	if bluePort == 0 {
+		bluePort = activePort
+	}
+	if greenPort == 0 {
+		greenPort = bluePort + 1
+	}
+	if imageTagFromState != "" {
+		imageTag = imageTagFromState
+	}
+
+	if err := m.portMgr.Reserve(service.ID, containerpkg.PortPair{BluePort: bluePort, GreenPort: greenPort}); err != nil {
+		m.logVerbose("Port reserve failed during recovery for %s: %v", service.ID, err)
+	}
+
+	m.containers[service.ID] = &containerInfo{
+		service:       service,
+		containerName: containerName,
+		imageTag:      imageTag,
+		port:          activePort,
+	}
+
+	if err := m.state.SaveServiceProcess(&state.ServiceProcess{
+		ServiceID:     service.ID,
+		ServiceName:   service.Name,
+		GitCommit:     service.GitCommit,
+		Runtime:       "docker",
+		ContainerName: containerName,
+		ImageTag:      imageTag,
+		Port:          bluePort,
+		GreenPort:     greenPort,
+		ActivePort:    activePort,
+		BaseImage:     service.BaseImage,
+		Language:      service.Language,
+		Status:        "running",
+		StartedAt:     time.Now().UTC(),
+	}); err != nil {
+		m.logVerbose("Failed to persist recovered service state for %s: %v", service.ID, err)
+	}
+
+	return activePort, true, nil
 }
 
 // GetServiceStatus returns the status of a service.

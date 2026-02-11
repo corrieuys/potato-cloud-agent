@@ -259,3 +259,39 @@ func TestPortManager_GetGreenPort(t *testing.T) {
 
 	t.Logf("✓ GetGreenPort returns correct port")
 }
+
+func TestPortManager_Reserve(t *testing.T) {
+	t.Logf("Testing reserve port pair")
+
+	pm := NewPortManager(3000, 3100)
+	err := pm.Reserve("service-1", PortPair{BluePort: 3050, GreenPort: 3051})
+	if err != nil {
+		t.Fatalf("Failed to reserve port pair: %v", err)
+	}
+
+	pair, exists := pm.Get("service-1")
+	if !exists {
+		t.Fatal("Expected reserved pair to exist")
+	}
+	if pair.BluePort != 3050 || pair.GreenPort != 3051 {
+		t.Fatalf("Unexpected reserved pair: %+v", pair)
+	}
+
+	t.Logf("✓ Reserved port pair")
+}
+
+func TestPortManager_Reserve_Conflict(t *testing.T) {
+	t.Logf("Testing reserve conflict detection")
+
+	pm := NewPortManager(3000, 3100)
+	if err := pm.Reserve("service-1", PortPair{BluePort: 3050, GreenPort: 3051}); err != nil {
+		t.Fatalf("Failed to reserve first pair: %v", err)
+	}
+
+	err := pm.Reserve("service-2", PortPair{BluePort: 3051, GreenPort: 3052})
+	if err == nil {
+		t.Fatal("Expected conflict error, got nil")
+	}
+
+	t.Logf("✓ Conflict correctly detected")
+}

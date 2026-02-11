@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ var (
 	renameContainer    = defaultRenameContainer
 	containerExists    = defaultContainerExists
 	getContainerStatus = defaultGetContainerStatus
+	getMappedHostPort  = defaultGetMappedHostPort
 	listImages         = defaultListImages
 	removeImage        = defaultRemoveImage
 
@@ -123,6 +125,34 @@ func defaultGetContainerStatus(containerName string) (string, error) {
 		status = "unknown"
 	}
 	return status, nil
+}
+
+func defaultGetMappedHostPort(containerName string, containerPort int) (int, error) {
+	if strings.TrimSpace(containerName) == "" || containerPort <= 0 {
+		return 0, nil
+	}
+
+	portSpec := fmt.Sprintf("%d/tcp", containerPort)
+	formatArg := fmt.Sprintf("{{with index .NetworkSettings.Ports %q}}{{(index . 0).HostPort}}{{end}}", portSpec)
+	output, err := exec.Command("docker", "inspect", "--format", formatArg, containerName).CombinedOutput()
+	if err != nil {
+		msg := string(output)
+		if strings.Contains(msg, "No such object") || strings.Contains(msg, "No such container") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("docker inspect port mapping failed: %w\nOutput: %s", err, strings.TrimSpace(msg))
+	}
+
+	hostPortStr := strings.TrimSpace(string(output))
+	if hostPortStr == "" {
+		return 0, nil
+	}
+
+	hostPort, convErr := strconv.Atoi(hostPortStr)
+	if convErr != nil {
+		return 0, fmt.Errorf("invalid host port %q: %w", hostPortStr, convErr)
+	}
+	return hostPort, nil
 }
 
 func defaultListImages(serviceID string) ([]ImageInfo, error) {

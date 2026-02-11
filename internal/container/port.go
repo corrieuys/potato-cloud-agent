@@ -70,6 +70,25 @@ func (pm *PortManager) Release(serviceID string) {
 	delete(pm.allocated, serviceID)
 }
 
+// Reserve sets a specific port pair for a service, used for restart recovery.
+func (pm *PortManager) Reserve(serviceID string, pair PortPair) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for existingServiceID, existingPair := range pm.allocated {
+		if existingServiceID == serviceID {
+			continue
+		}
+		if existingPair.BluePort == pair.BluePort || existingPair.GreenPort == pair.GreenPort ||
+			existingPair.BluePort == pair.GreenPort || existingPair.GreenPort == pair.BluePort {
+			return fmt.Errorf("port pair conflict with service %s", existingServiceID)
+		}
+	}
+
+	pm.allocated[serviceID] = pair
+	return nil
+}
+
 // isPortAvailable checks if a port is not in use and not allocated
 func (pm *PortManager) isPortAvailable(port int) bool {
 	// Check if already allocated to another service

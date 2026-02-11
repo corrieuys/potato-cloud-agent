@@ -377,13 +377,11 @@ func (a *Agent) sync() error {
 	if err != nil {
 		return fmt.Errorf("failed to get applied state: %w", err)
 	}
+	stateChanged := applied == nil || applied.StateHash != desired.Hash
 
-	if applied != nil && applied.StateHash == desired.Hash {
-		// No changes needed
-		return nil
+	if stateChanged {
+		log.Printf("Applying state version %d (hash: %s)", desired.Version, desired.Hash)
 	}
-
-	log.Printf("Applying state version %d (hash: %s)", desired.Version, desired.Hash)
 
 	hadErrors := false
 	desiredByID := make(map[string]api.Service)
@@ -436,36 +434,56 @@ func (a *Agent) sync() error {
 		if svc.GitRef == "" {
 			svc.GitRef = "main"
 		}
+		serviceNames = append(serviceNames, svc.Name)
 
-		resolvedCommit, err := a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
-		if err != nil {
-			log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
-			hadErrors = true
-			continue
+		assignedPort, exists := a.services.GetServicePort(svc.ID)
+		if !exists {
+			recoveredPort, recovered, recoverErr := a.services.RecoverService(svc)
+			if recoverErr != nil {
+				log.Printf("Failed to recover service %s: %v", svc.Name, recoverErr)
+				hadErrors = true
+			} else if recovered {
+				assignedPort = recoveredPort
+				exists = true
+			}
 		}
-		svc.GitCommit = resolvedCommit
 
-		proc, _ := a.state.GetServiceProcess(svc.ID)
-		needsDeploy := true
-		if proc != nil && proc.GitCommit == resolvedCommit && proc.Status == "running" {
-			needsDeploy = false
+		needsDeploy := false
+		if !exists {
+			needsDeploy = true
 		}
 
-		if needsDeploy {
-			// repoPath := a.git.GetRepoPath(svc.ID)
-			if err := a.services.DeployService(svc); err != nil {
-				log.Printf("Failed to deploy service %s: %v", svc.Name, err)
+		if stateChanged || needsDeploy {
+			resolvedCommit, err := a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
+			if err != nil {
+				log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
+				hadErrors = true
+				continue
+			}
+			svc.GitCommit = resolvedCommit
+
+			proc, _ := a.state.GetServiceProcess(svc.ID)
+			needsDeploy = needsDeploy || proc == nil || proc.GitCommit != resolvedCommit || proc.Status != "running"
+
+			if needsDeploy {
+				if err := a.services.DeployService(svc); err != nil {
+					log.Printf("Failed to deploy service %s: %v", svc.Name, err)
+					hadErrors = true
+					continue
+				}
+			}
+
+			assignedPort, exists = a.services.GetServicePort(svc.ID)
+			if !exists {
+				log.Printf("Warning: no port assigned for service %s after sync", svc.Name)
 				hadErrors = true
 				continue
 			}
 		}
 
-		serviceNames = append(serviceNames, svc.Name)
-
-		// Get assigned port for routing
-		assignedPort, exists := a.services.GetServicePort(svc.ID)
 		if !exists {
 			log.Printf("Warning: no port assigned for service %s", svc.Name)
+			hadErrors = true
 			continue
 		}
 
@@ -503,12 +521,13 @@ func (a *Agent) sync() error {
 	}
 
 	// Record that we applied this state
-	if !hadErrors {
+	if hadErrors {
+		return fmt.Errorf("state applied with errors")
+	}
+	if stateChanged {
 		if err := a.state.SetAppliedState(desired.Version, desired.Hash); err != nil {
 			return fmt.Errorf("failed to record applied state: %w", err)
 		}
-	} else {
-		return fmt.Errorf("state applied with errors")
 	}
 
 	return nil
