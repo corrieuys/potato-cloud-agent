@@ -52,6 +52,10 @@ The agent is the worker that runs on your server. It:
 - 2GB+ RAM
 - 20GB+ disk space
 
+**Required for source builds:**
+- GCC/build toolchain (`build-essential` on Debian/Ubuntu)
+- CGO enabled (`CGO_ENABLED=1`) because SQLite uses `github.com/mattn/go-sqlite3`
+
 **Perfect For:**
 - Raspberry Pi 4B+ ($35-75)
 - Old laptops collecting dust (free!)
@@ -148,7 +152,7 @@ The install script will:
 git clone https://github.com/corrieuys/potato-cloud-agent.git
 cd potato-cloud-agent
 go mod tidy
-go build -o potato-cloud-agent ./cmd/agent
+CGO_ENABLED=1 go build -o potato-cloud-agent ./cmd/agent
 sudo mv potato-cloud-agent /usr/local/bin/
 ```
 
