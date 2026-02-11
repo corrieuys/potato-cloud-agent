@@ -34,6 +34,11 @@ type LanguageConfig struct {
 }
 
 var LanguageConfigs = map[string]LanguageConfig{
+	"bun": {
+		DefaultBaseImage: "oven/bun:1.0.5-alpine",
+		Template:         bunDockerfile,
+		DetectFiles:      []string{"bun.lockb", "bun.lock"},
+	},
 	"nodejs": {
 		DefaultBaseImage: "node:20-alpine",
 		Template:         nodejsDockerfile,
@@ -77,6 +82,9 @@ type TemplateData struct {
 
 // DetectLanguage automatically detects the language/runtime from repository files
 func (g *Generator) DetectLanguage(repoPath string) string {
+	if fileExists(repoPath, "bun.lockb") || fileExists(repoPath, "bun.lock") {
+		return "bun"
+	}
 	for lang, config := range LanguageConfigs {
 		for _, file := range config.DetectFiles {
 			if _, err := os.Stat(filepath.Join(repoPath, file)); err == nil {
@@ -85,6 +93,11 @@ func (g *Generator) DetectLanguage(repoPath string) string {
 		}
 	}
 	return "generic"
+}
+
+func fileExists(repoPath, name string) bool {
+	_, err := os.Stat(filepath.Join(repoPath, name))
+	return err == nil
 }
 
 // GenerateDockerfile creates a Dockerfile for the given service

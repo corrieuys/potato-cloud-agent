@@ -44,6 +44,7 @@ func (c *Client) setAccessHeaders(req *http.Request) {
 
 // Language constants
 const (
+	LangBun     = "bun"
 	LangNodeJS  = "nodejs"
 	LangGo      = "golang"
 	LangPython  = "python"

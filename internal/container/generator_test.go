@@ -48,6 +48,24 @@ go 1.21`
 	t.Logf("✓ Correctly detected Go")
 }
 
+func TestDetectLanguage_Bun(t *testing.T) {
+	t.Logf("Testing Bun language detection")
+
+	gen := NewGenerator(3000, 3100)
+	tempDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(tempDir, "bun.lockb"), []byte("lock"), 0644); err != nil {
+		t.Fatalf("Failed to create bun.lockb: %v", err)
+	}
+
+	lang := gen.DetectLanguage(tempDir)
+	if lang != "bun" {
+		t.Errorf("Expected language 'bun', got '%s'", lang)
+	}
+
+	t.Logf("✓ Correctly detected Bun")
+}
+
 func TestDetectLanguage_Python(t *testing.T) {
 	t.Logf("Testing Python language detection")
 

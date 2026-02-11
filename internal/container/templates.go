@@ -2,6 +2,20 @@ package container
 
 // Dockerfile templates for each language
 const (
+	// bunDockerfile is a single-stage build for Bun applications
+	bunDockerfile = `FROM {{.BaseImage}}
+WORKDIR /app
+COPY . .
+RUN {{.BuildCommand}}
+ENV PORT={{.Port}}
+{{- range $key, $value := .EnvVars }}
+ENV {{$key}}={{$value}}
+{{- end }}
+EXPOSE {{.Port}}
+USER 1000:1000
+CMD ["sh", "-c", "{{.RunCommand}}"]
+`
+
 	// nodejsDockerfile is a single-stage build for Node.js applications
 	nodejsDockerfile = `FROM {{.BaseImage}}
 WORKDIR /app
