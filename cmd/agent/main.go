@@ -273,6 +273,7 @@ type Agent struct {
 // Run starts the agent main loop
 func (a *Agent) Run() {
 	a.stopChan = make(chan struct{})
+	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds", a.config.PollInterval, 30)
 
 	if a.externalProxy != nil {
 		go func() {
@@ -312,10 +313,12 @@ func (a *Agent) Run() {
 		case <-a.stopChan:
 			return
 		case <-ticker.C:
+			a.logVerbosef("Sync tick")
 			if err := a.sync(); err != nil {
 				log.Printf("Sync failed: %v", err)
 			}
 		case <-heartbeatTicker.C:
+			a.logVerbosef("Heartbeat tick")
 			if err := a.sendHeartbeat(); err != nil {
 				log.Printf("Heartbeat failed: %v", err)
 			}
@@ -366,11 +369,15 @@ func (a *Agent) Stop() {
 
 // sync fetches desired state and applies changes
 func (a *Agent) sync() error {
+	start := time.Now()
+	log.Printf("Sync started: stack=%s", a.config.StackID)
+
 	// Fetch desired state
 	desired, err := a.api.GetDesiredState(a.config.StackID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch desired state: %w", err)
 	}
+	a.logVerbosef("Desired state received: version=%d hash=%s services=%d mode=%s poll_interval=%d", desired.Version, desired.Hash, len(desired.Services), desired.SecurityMode, desired.PollInterval)
 
 	// Check if we need to apply changes
 	applied, err := a.state.GetAppliedState()
@@ -381,6 +388,8 @@ func (a *Agent) sync() error {
 
 	if stateChanged {
 		log.Printf("Applying state version %d (hash: %s)", desired.Version, desired.Hash)
+	} else {
+		log.Printf("Desired state unchanged (hash: %s); reconciling runtime and routes", desired.Hash)
 	}
 
 	hadErrors := false
@@ -445,6 +454,7 @@ func (a *Agent) sync() error {
 			} else if recovered {
 				assignedPort = recoveredPort
 				exists = true
+				log.Printf("Recovered running service: name=%s service=%s port=%d", svc.Name, svc.ID, assignedPort)
 			}
 		}
 
@@ -466,6 +476,7 @@ func (a *Agent) sync() error {
 			needsDeploy = needsDeploy || proc == nil || proc.GitCommit != resolvedCommit || proc.Status != "running"
 
 			if needsDeploy {
+				log.Printf("Deploying service: name=%s service=%s reason=%s", svc.Name, svc.ID, deployReason(stateChanged, exists, proc, resolvedCommit))
 				if err := a.services.DeployService(svc); err != nil {
 					log.Printf("Failed to deploy service %s: %v", svc.Name, err)
 					hadErrors = true
@@ -507,6 +518,7 @@ func (a *Agent) sync() error {
 	// Update proxy routes
 	a.externalProxy.UpdateRoutes(externalRoutes)
 	a.internalProxy.UpdateRoutes(internalRoutes)
+	log.Printf("Routes updated: external=%d internal=%d services=%d", len(externalRoutes), len(internalRoutes), len(serviceNames))
 
 	// Update DNS entries
 	if err := a.dnsMgr.UpdateServices(serviceNames); err != nil {
@@ -529,6 +541,7 @@ func (a *Agent) sync() error {
 			return fmt.Errorf("failed to record applied state: %w", err)
 		}
 	}
+	log.Printf("Sync completed: state_changed=%t services=%d elapsed=%s", stateChanged, len(desired.Services), time.Since(start))
 
 	return nil
 }
@@ -561,6 +574,9 @@ func (a *Agent) updateFirewall(mode string, port int) error {
 
 // sendHeartbeat sends a heartbeat to the control plane
 func (a *Agent) sendHeartbeat() error {
+	start := time.Now()
+	log.Printf("Heartbeat started")
+
 	// Get all service statuses
 	processes, err := a.state.ListServiceProcesses()
 	if err != nil {
@@ -634,7 +650,36 @@ func (a *Agent) sendHeartbeat() error {
 		},
 	}
 
-	return a.api.SendHeartbeat(req)
+	if err := a.api.SendHeartbeat(req); err != nil {
+		return err
+	}
+	log.Printf("Heartbeat sent: stack_version=%d services=%d elapsed=%s", stackVersion, len(servicesStatus), time.Since(start))
+	return nil
+}
+
+func (a *Agent) logVerbosef(format string, args ...interface{}) {
+	if a.config != nil && a.config.VerboseLogging {
+		log.Printf(format, args...)
+	}
+}
+
+func deployReason(stateChanged bool, serviceFound bool, proc *state.ServiceProcess, resolvedCommit string) string {
+	if !serviceFound {
+		return "not_tracked_in_memory"
+	}
+	if proc == nil {
+		return "no_persisted_process"
+	}
+	if proc.GitCommit != resolvedCommit {
+		return "git_commit_changed"
+	}
+	if proc.Status != "running" {
+		return "persisted_status_not_running"
+	}
+	if stateChanged {
+		return "state_changed"
+	}
+	return "unknown"
 }
 
 func (a *Agent) getExternalExposure() string {
