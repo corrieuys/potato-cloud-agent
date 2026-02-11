@@ -133,7 +133,7 @@ func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName
 
 	// First fetch to ensure we have the commit
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
-		_ = err
+		log.Printf("Git fetch failed (commit=%s): %v", commit, err)
 	}
 
 	if err := worktree.Checkout(&git.CheckoutOptions{Hash: plumbing.NewHash(commit), Force: true}); err != nil {
@@ -145,7 +145,9 @@ func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName
 		return "", fmt.Errorf("failed to read HEAD: %w", err)
 	}
 
-	return head.Hash().String(), nil
+	resolved := head.Hash().String()
+	log.Printf("Git checkout commit resolved: %s", resolved)
+	return resolved, nil
 }
 
 func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName string) (string, error) {
@@ -160,19 +162,21 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 	}
 
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
-		_ = err
+		log.Printf("Git fetch failed (ref=%s): %v", ref, err)
 	}
 
 	branchRef := plumbing.NewBranchReferenceName(ref)
 	if err := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef, Force: true}); err == nil {
 		if err := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
-			_ = err
+			log.Printf("Git pull failed (ref=%s): %v", ref, err)
 		}
 		head, err := repo.Head()
 		if err != nil {
 			return "", fmt.Errorf("failed to read HEAD: %w", err)
 		}
-		return head.Hash().String(), nil
+		resolved := head.Hash().String()
+		log.Printf("Git checkout ref resolved: ref=%s commit=%s", ref, resolved)
+		return resolved, nil
 	}
 
 	// Fallback to tag ref
@@ -191,7 +195,9 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 		return "", fmt.Errorf("failed to read HEAD: %w", err)
 	}
 
-	return head.Hash().String(), nil
+	resolved := head.Hash().String()
+	log.Printf("Git checkout tag resolved: ref=%s commit=%s", ref, resolved)
+	return resolved, nil
 }
 
 func (m *Manager) authForRepo(gitURL, keyName string) (*gitssh.PublicKeys, error) {
