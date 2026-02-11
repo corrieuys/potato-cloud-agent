@@ -236,8 +236,8 @@ func TestRegister_Success(t *testing.T) {
 		if r.Method != "POST" {
 			t.Errorf("Expected POST request, got %s", r.Method)
 		}
-		if r.URL.Path != "/api/agents/register" {
-			t.Errorf("Expected path /api/agents/register, got %s", r.URL.Path)
+		if r.URL.Path != "/api/stacks/stack-456/agents/register" {
+			t.Errorf("Expected path /api/stacks/stack-456/agents/register, got %s", r.URL.Path)
 		}
 
 		// Decode request
@@ -262,7 +262,7 @@ func TestRegister_Success(t *testing.T) {
 		IPAddress:    "192.168.1.1",
 	}
 
-	resp, err := Register(server.URL, req)
+	resp, err := Register(server.URL, "stack-456", req)
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -293,10 +293,25 @@ func TestRegister_HTTPError(t *testing.T) {
 		InstallToken: "invalid-token",
 	}
 
-	_, err := Register(server.URL, req)
+	_, err := Register(server.URL, "stack-456", req)
 	if err == nil {
 		t.Fatal("Expected error for HTTP 401, got nil")
 	}
 
 	t.Logf("✓ Register correctly returned error for HTTP 401")
+}
+
+func TestRegister_MissingStackID(t *testing.T) {
+	t.Logf("Testing Register missing stack ID")
+
+	req := RegistrationRequest{
+		InstallToken: "install-token-123",
+	}
+
+	_, err := Register("https://example.com", "", req)
+	if err == nil {
+		t.Fatal("Expected error when stack ID is missing")
+	}
+
+	t.Logf("✓ Register correctly returned error for missing stack ID")
 }

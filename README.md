@@ -127,12 +127,11 @@ Generated Dockerfiles:
 Get your install token from the Potato Cloud dashboard, then run:
 
 ```bash
-curl -fsSL https://potatocloud.space/install.sh | sudo bash -s -- --token <INSTALL_TOKEN> --control-plane https://your-control-plane.workers.dev
+curl -fsSL https://potatocloud.space/install.sh | sudo bash -s -- --token <INSTALL_TOKEN> --stack-id <STACK_ID> --control-plane https://your-control-plane.workers.dev
 ```
 
 The install script will:
-- Install Go if not present
-- Download and build the agent
+- Download prebuilt agent binary
 - Register with the control plane
 - Create necessary directories
 - Start as a systemd service
@@ -140,6 +139,7 @@ The install script will:
 **Optional flags:**
 - `--version <tag>`: Install specific version
 - `--control-plane <url>`: Override control plane URL
+- `--stack-id <id>`: Stack ID for registration endpoint
 - `--force-register`: Re-register even if already configured
 
 ### Manual Build
@@ -156,6 +156,7 @@ sudo mv potato-cloud-agent /usr/local/bin/
 
 ```bash
 sudo potato-cloud-agent -register <INSTALL_TOKEN> \
+  -stack-id <STACK_ID> \
   -control-plane https://your-control-plane.workers.dev \
   -config /etc/buildvigil/config.json
 ```

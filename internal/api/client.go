@@ -108,9 +108,14 @@ type RegistrationResponse struct {
 	PollInterval int    `json:"poll_interval"`
 }
 
-// Register exchanges an install token for permanent credentials
-func Register(baseURL string, req RegistrationRequest) (*RegistrationResponse, error) {
-	url := fmt.Sprintf("%s/api/agents/register", baseURL)
+// Register exchanges an install token for permanent credentials.
+// stackID is required for stack-scoped registration endpoints.
+func Register(baseURL, stackID string, req RegistrationRequest) (*RegistrationResponse, error) {
+	if stackID == "" {
+		return nil, fmt.Errorf("stack ID is required for registration")
+	}
+
+	url := fmt.Sprintf("%s/api/stacks/%s/agents/register", baseURL, stackID)
 
 	body, err := json.Marshal(req)
 	if err != nil {

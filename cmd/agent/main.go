@@ -30,6 +30,7 @@ func main() {
 		sshKeyName    = flag.String("ssh-key-name", "default", "SSH key name to generate (filename under ssh dir)")
 		configPath    = flag.String("config", config.ConfigPath(), "Path to config file")
 		controlPlane  = flag.String("control-plane", "http://localhost:8787", "Control plane URL")
+		stackID       = flag.String("stack-id", "", "Stack ID (required for registration)")
 		setAPIKey     = flag.String("set-api-key", "", "Update stored API key in agent config")
 		applyFirewall = flag.Bool("apply-firewall", false, "Apply firewall rules (requires root)")
 		showStatus    = flag.Bool("status", false, "Show current service status")
@@ -50,7 +51,7 @@ func main() {
 	flag.Parse()
 
 	if *registerToken != "" {
-		if err := doRegistration(*controlPlane, *registerToken, *configPath); err != nil {
+		if err := doRegistration(*controlPlane, *stackID, *registerToken, *configPath); err != nil {
 			log.Fatalf("Registration failed: %v", err)
 		}
 		fmt.Println("Registration successful. Agent is configured.")
@@ -206,7 +207,11 @@ func main() {
 }
 
 // doRegistration handles the initial agent registration
-func doRegistration(controlPlane, installToken, configPath string) error {
+func doRegistration(controlPlane, stackID, installToken, configPath string) error {
+	if strings.TrimSpace(stackID) == "" {
+		return fmt.Errorf("stack ID is required (use -stack-id)")
+	}
+
 	// Get system info
 	hostname, _ := os.Hostname()
 	ipAddress := getLocalIP()
@@ -218,7 +223,7 @@ func doRegistration(controlPlane, installToken, configPath string) error {
 		IPAddress:    ipAddress,
 	}
 
-	resp, err := api.Register(controlPlane, req)
+	resp, err := api.Register(controlPlane, stackID, req)
 	if err != nil {
 		return fmt.Errorf("registration failed: %w", err)
 	}
