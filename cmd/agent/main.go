@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,7 +21,6 @@ import (
 	"github.com/buildvigil/agent/internal/secrets"
 	"github.com/buildvigil/agent/internal/service"
 	"github.com/buildvigil/agent/internal/state"
-	"github.com/buildvigil/agent/internal/tunnel"
 )
 
 type optionalString struct {
@@ -170,15 +171,6 @@ func main() {
 	// Initialize firewall manager (will be configured after first sync)
 	var fwMgr *firewall.Manager
 
-	// Initialize tunnel manager if Cloudflare config is available
-	var tunnelMgr *tunnel.CloudflareTunnel
-	if cfg.HasCloudflareConfig() {
-		tunnelMgr = tunnel.NewCloudflareTunnel(cfg.TunnelConfigPath(), cfg.GetCloudflareCredentials())
-		log.Printf("Cloudflare tunnel support enabled")
-	} else {
-		log.Printf("Cloudflare tunnel support disabled (no configuration)")
-	}
-
 	// Create agent
 	agent := &Agent{
 		config:        cfg,
@@ -190,10 +182,11 @@ func main() {
 		internalProxy: internalProxy,
 		dnsMgr:        dnsMgr,
 		fwMgr:         fwMgr,
-		tunnelMgr:     tunnelMgr,
 		applyFirewall: *applyFirewall,
 		healthPort:    9090, // Health check server port
+		lifecycle:     make(map[string]api.ServiceStatus),
 	}
+	svcMgr.SetLifecycleReporter(agent.onServiceLifecycleEvent)
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -263,11 +256,13 @@ type Agent struct {
 	internalProxy *proxy.InternalProxy
 	dnsMgr        *proxy.DNSManager
 	fwMgr         *firewall.Manager
-	tunnelMgr     *tunnel.CloudflareTunnel
 	stopChan      chan struct{}
 	applyFirewall bool
 	currentMode   string
 	healthPort    int
+	heartbeatMu   sync.Mutex
+	lifecycleMu   sync.RWMutex
+	lifecycle     map[string]api.ServiceStatus
 }
 
 // Run starts the agent main loop
@@ -350,13 +345,6 @@ func (a *Agent) Stop() {
 	// Cleanup DNS
 	if a.dnsMgr != nil {
 		a.dnsMgr.Cleanup()
-	}
-
-	// Stop tunnel
-	if a.tunnelMgr != nil {
-		if err := a.tunnelMgr.Stop(); err != nil {
-			log.Printf("Failed to stop tunnel: %v", err)
-		}
 	}
 
 	// Revert firewall rules
@@ -464,8 +452,10 @@ func (a *Agent) sync() error {
 		}
 
 		if stateChanged || needsDeploy {
+			a.onServiceLifecycleEvent(svc, "building", "unknown", "")
 			resolvedCommit, err := a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
 			if err != nil {
+				a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
 				log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
 				hadErrors = true
 				continue
@@ -478,6 +468,7 @@ func (a *Agent) sync() error {
 			if needsDeploy {
 				log.Printf("Deploying service: name=%s service=%s reason=%s", svc.Name, svc.ID, deployReason(stateChanged, exists, proc, resolvedCommit))
 				if err := a.services.DeployService(svc); err != nil {
+					a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
 					log.Printf("Failed to deploy service %s: %v", svc.Name, err)
 					hadErrors = true
 					continue
@@ -525,13 +516,6 @@ func (a *Agent) sync() error {
 		log.Printf("Failed to update DNS: %v", err)
 	}
 
-	// Update tunnel configuration if available
-	if a.tunnelMgr != nil {
-		if err := a.updateTunnel(desired.Services); err != nil {
-			log.Printf("Failed to update tunnel: %v", err)
-		}
-	}
-
 	// Record that we applied this state
 	if hadErrors {
 		return fmt.Errorf("state applied with errors")
@@ -574,6 +558,9 @@ func (a *Agent) updateFirewall(mode string, port int) error {
 
 // sendHeartbeat sends a heartbeat to the control plane
 func (a *Agent) sendHeartbeat() error {
+	a.heartbeatMu.Lock()
+	defer a.heartbeatMu.Unlock()
+
 	start := time.Now()
 	log.Printf("Heartbeat started")
 
@@ -583,7 +570,7 @@ func (a *Agent) sendHeartbeat() error {
 		return fmt.Errorf("failed to list processes: %w", err)
 	}
 
-	var servicesStatus []api.ServiceStatus
+	statusByService := make(map[string]api.ServiceStatus)
 	for _, proc := range processes {
 		// Check if actually running
 		status := proc.Status
@@ -605,7 +592,7 @@ func (a *Agent) sendHeartbeat() error {
 		// 	}
 		// }
 
-		servicesStatus = append(servicesStatus, api.ServiceStatus{
+		statusByService[proc.ServiceID] = api.ServiceStatus{
 			ServiceID:    proc.ServiceID,
 			Name:         proc.ServiceName,
 			Status:       status,
@@ -613,7 +600,24 @@ func (a *Agent) sendHeartbeat() error {
 			RestartCount: proc.RestartCount,
 			LastError:    proc.LastError,
 			HealthStatus: healthStatus,
-		})
+		}
+	}
+
+	a.lifecycleMu.RLock()
+	for serviceID, lifecycleStatus := range a.lifecycle {
+		statusByService[serviceID] = lifecycleStatus
+	}
+	a.lifecycleMu.RUnlock()
+
+	keys := make([]string, 0, len(statusByService))
+	for key := range statusByService {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	servicesStatus := make([]api.ServiceStatus, 0, len(keys))
+	for _, key := range keys {
+		servicesStatus = append(servicesStatus, statusByService[key])
 	}
 
 	// Get applied state
@@ -629,12 +633,6 @@ func (a *Agent) sendHeartbeat() error {
 		fwStatus, _ = a.fwMgr.GetStatus()
 	}
 
-	// Get tunnel status
-	tunnelConnected := false
-	if a.tunnelMgr != nil {
-		tunnelConnected = a.tunnelMgr.IsConnected()
-	}
-
 	req := api.HeartbeatRequest{
 		StackVersion:   stackVersion,
 		AgentStatus:    "healthy",
@@ -642,7 +640,6 @@ func (a *Agent) sendHeartbeat() error {
 		SecurityState: map[string]interface{}{
 			"mode":              a.currentMode,
 			"external_exposure": a.getExternalExposure(),
-			"tunnel_connected":  tunnelConnected,
 			"firewall_status":   fwStatus,
 		},
 		SystemInfo: map[string]interface{}{
@@ -661,6 +658,29 @@ func (a *Agent) logVerbosef(format string, args ...interface{}) {
 	if a.config != nil && a.config.VerboseLogging {
 		log.Printf(format, args...)
 	}
+}
+
+func (a *Agent) onServiceLifecycleEvent(service api.Service, status, healthStatus, lastError string) {
+	a.lifecycleMu.Lock()
+	a.lifecycle[service.ID] = api.ServiceStatus{
+		ServiceID:    service.ID,
+		Name:         service.Name,
+		Status:       status,
+		RestartCount: 0,
+		LastError:    lastError,
+		HealthStatus: healthStatus,
+	}
+	a.lifecycleMu.Unlock()
+
+	log.Printf("Lifecycle update: service=%s name=%s status=%s health=%s", service.ID, service.Name, status, healthStatus)
+
+	go func() {
+		if err := a.sendHeartbeat(); err != nil {
+			log.Printf("Lifecycle heartbeat failed: service=%s status=%s err=%v", service.ID, status, err)
+		} else {
+			log.Printf("Lifecycle heartbeat sent: service=%s status=%s", service.ID, status)
+		}
+	}()
 }
 
 func deployReason(stateChanged bool, serviceFound bool, proc *state.ServiceProcess, resolvedCommit string) string {
@@ -691,74 +711,6 @@ func (a *Agent) getExternalExposure() string {
 	default:
 		return "unrestricted"
 	}
-}
-
-// updateTunnel updates the Cloudflare tunnel configuration
-func (a *Agent) updateTunnel(services []api.Service) error {
-	if a.tunnelMgr == nil {
-		return nil
-	}
-
-	// Check if cloudflared is available
-	if !tunnel.IsCloudflaredAvailable() {
-		log.Printf("Cloudflared not found, tunnel management disabled")
-		return nil
-	}
-
-	// Create tunnel if needed
-	if a.tunnelMgr.GetStatus()["tunnel_id"] == "" {
-		log.Printf("Creating Cloudflare tunnel...")
-		if err := a.tunnelMgr.CreateTunnel("buildvigil-agent-"+a.config.AgentID, ""); err != nil {
-			return fmt.Errorf("failed to create tunnel: %w", err)
-		}
-	}
-
-	// Prepare service configs for tunnel
-	var tunnelServices []tunnel.ServiceConfig
-	for _, svc := range services {
-		// Get the assigned port for this service
-		assignedPort, exists := a.services.GetServicePort(svc.ID)
-		if !exists {
-			continue
-		}
-
-		if svc.ExternalPath != "" && assignedPort > 0 {
-			// For now, use service name as hostname
-			// In a real implementation, this would come from desired state
-			hostname := fmt.Sprintf("%s.%s.tunnel.buildvigil.dev", svc.Name, a.config.AgentID)
-			tunnelServices = append(tunnelServices, tunnel.ServiceConfig{
-				Name:     svc.Name,
-				Port:     assignedPort,
-				Hostname: hostname,
-			})
-		}
-	}
-
-	// Write tunnel configuration
-	if len(tunnelServices) > 0 {
-		log.Printf("Updating tunnel configuration with %d services", len(tunnelServices))
-		if err := a.tunnelMgr.WriteConfig(tunnelServices); err != nil {
-			return fmt.Errorf("failed to write tunnel config: %w", err)
-		}
-
-		// Start tunnel if not running
-		if !a.tunnelMgr.IsConnected() {
-			log.Printf("Starting Cloudflare tunnel...")
-			if err := a.tunnelMgr.Start(); err != nil {
-				return fmt.Errorf("failed to start tunnel: %w", err)
-			}
-		}
-	} else {
-		// Stop tunnel if no services need exposure
-		if a.tunnelMgr.IsConnected() {
-			log.Printf("Stopping Cloudflare tunnel (no services to expose)")
-			if err := a.tunnelMgr.Stop(); err != nil {
-				return fmt.Errorf("failed to stop tunnel: %w", err)
-			}
-		}
-	}
-
-	return nil
 }
 
 func getHostname() string {

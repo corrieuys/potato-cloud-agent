@@ -28,6 +28,7 @@ const (
 
 // ProxyUpdater is a callback function to update proxy routes.
 type ProxyUpdater func(serviceID string, activePort int) error
+type LifecycleReporter func(service api.Service, status, healthStatus, lastError string)
 
 type containerInfo struct {
 	service       api.Service
@@ -45,6 +46,7 @@ type Manager struct {
 	portMgr      *containerpkg.PortManager
 	generator    *containerpkg.Generator
 	proxyUpdater ProxyUpdater
+	lifecycle    LifecycleReporter
 	verbose      bool
 	mu           sync.RWMutex
 }
@@ -69,10 +71,18 @@ func (m *Manager) SetProxyUpdater(updater ProxyUpdater) {
 	m.proxyUpdater = updater
 }
 
+// SetLifecycleReporter sets a callback for lifecycle state changes.
+func (m *Manager) SetLifecycleReporter(reporter LifecycleReporter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lifecycle = reporter
+}
+
 // DeployService deploys a service using Docker containers with zero-downtime.
 func (m *Manager) DeployService(service api.Service) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.reportLifecycle(service, "building", "unknown", "")
 
 	containerName := fmt.Sprintf("%s-%s", ContainerPrefix, service.ID)
 	imageTag := fmt.Sprintf("%s-%s:latest", ImagePrefix, service.ID)
@@ -92,6 +102,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	log.Printf("[ServiceManager] Initial deploy begin: service=%s", service.ID)
 	imageID, err := m.buildServiceImage(service, imageTag)
 	if err != nil {
+		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to build image: %w", err)
 	}
 
@@ -115,6 +126,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	containerID, err := m.startContainer(containerName, imageID, port, containerPort, env, nil)
 	if err != nil {
 		m.portMgr.Release(service.ID)
+		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to start container: %w", err)
 	}
 	log.Printf("[ServiceManager] Container started: service=%s container=%s id=%s", service.ID, containerName, containerID)
@@ -122,14 +134,17 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	if err := ConnectContainerToStackNetwork(containerID, service.ID); err != nil {
 		_ = m.stopContainer(containerName)
 		m.portMgr.Release(service.ID)
+		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to connect container to stack network: %w", err)
 	}
 	log.Printf("[ServiceManager] Network connected: service=%s network=stack-%s-network", service.ID, service.ID)
 
+	m.reportLifecycle(service, "health_check", "unknown", "")
 	if err := m.healthCheck(service, containerName, port); err != nil {
 		_ = m.stopContainer(containerName)
 		_ = DisconnectContainerFromStackNetwork(containerID, service.ID)
 		m.portMgr.Release(service.ID)
+		m.reportLifecycle(service, "error", "unhealthy", err.Error())
 		return fmt.Errorf("health check failed: %w", err)
 	}
 	log.Printf("[ServiceManager] Health check passed: service=%s", service.ID)
@@ -165,6 +180,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	}); err != nil {
 		m.logVerbose("Failed to persist service state for %s: %v", service.ID, err)
 	}
+	m.reportLifecycle(service, "running", runningHealthStatus(service), "")
 
 	m.logVerbose("Service %s deployed successfully on port %d", service.ID, port)
 	log.Printf("[ServiceManager] Initial deploy complete: service=%s hostPort=%d elapsed=%s", service.ID, port, time.Since(start))
@@ -176,6 +192,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	log.Printf("[ServiceManager] Blue/green deploy begin: service=%s", service.ID)
 	imageID, err := m.buildServiceImage(service, imageTag)
 	if err != nil {
+		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to build new image: %w", err)
 	}
 
@@ -198,18 +215,22 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	log.Printf("[ServiceManager] Blue/green container port: service=%s containerPort=%d", service.ID, containerPort)
 	greenContainerID, err := m.startContainer(greenContainerName, imageID, greenPort, containerPort, env, nil)
 	if err != nil {
+		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to start green container: %w", err)
 	}
 	log.Printf("[ServiceManager] Green container started: service=%s container=%s id=%s", service.ID, greenContainerName, greenContainerID)
 
 	if err := ConnectContainerToStackNetwork(greenContainerID, service.ID); err != nil {
 		_ = m.stopContainer(greenContainerName)
+		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to connect green container to stack network: %w", err)
 	}
 
+	m.reportLifecycle(service, "health_check", "unknown", "")
 	if err := m.healthCheck(service, greenContainerName, greenPort); err != nil {
 		_ = m.stopContainer(greenContainerName)
 		_ = DisconnectContainerFromStackNetwork(greenContainerID, service.ID)
+		m.reportLifecycle(service, "error", "unhealthy", err.Error())
 		return fmt.Errorf("green container health check failed: %w", err)
 	}
 	log.Printf("[ServiceManager] Green health check passed: service=%s", service.ID)
@@ -259,6 +280,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	}); err != nil {
 		m.logVerbose("Failed to persist service state for %s: %v", service.ID, err)
 	}
+	m.reportLifecycle(service, "running", runningHealthStatus(service), "")
 
 	m.logVerbose("Blue/green deployment completed for service %s, now on port %d", service.ID, greenPort)
 	log.Printf("[ServiceManager] Blue/green deploy complete: service=%s activePort=%d elapsed=%s", service.ID, greenPort, time.Since(start))
@@ -753,4 +775,17 @@ func (m *Manager) logVerbose(format string, args ...interface{}) {
 	if m.verbose {
 		fmt.Printf("[ServiceManager] "+format+"\n", args...)
 	}
+}
+
+func (m *Manager) reportLifecycle(service api.Service, status, healthStatus, lastError string) {
+	if m.lifecycle != nil {
+		m.lifecycle(service, status, healthStatus, lastError)
+	}
+}
+
+func runningHealthStatus(service api.Service) string {
+	if strings.TrimSpace(service.HealthCheckPath) != "" {
+		return "healthy"
+	}
+	return "unknown"
 }
