@@ -134,6 +134,11 @@ func (m *Manager) checkoutCommit(repo *git.Repository, commit string, sshKeyName
 	// First fetch to ensure we have the commit
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 		log.Printf("Git fetch failed (commit=%s): %v", commit, err)
+		if strings.Contains(err.Error(), "invalid auth method") && auth != nil {
+			if retryErr := repo.Fetch(&git.FetchOptions{Progress: os.Stdout}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
+				log.Printf("Git fetch retry without auth failed (commit=%s): %v", commit, retryErr)
+			}
+		}
 	}
 
 	if err := worktree.Checkout(&git.CheckoutOptions{Hash: plumbing.NewHash(commit), Force: true}); err != nil {
@@ -163,12 +168,22 @@ func (m *Manager) checkoutRef(repo *git.Repository, ref string, sshKeyName strin
 
 	if err := repo.Fetch(&git.FetchOptions{Progress: os.Stdout, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 		log.Printf("Git fetch failed (ref=%s): %v", ref, err)
+		if strings.Contains(err.Error(), "invalid auth method") && auth != nil {
+			if retryErr := repo.Fetch(&git.FetchOptions{Progress: os.Stdout}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
+				log.Printf("Git fetch retry without auth failed (ref=%s): %v", ref, retryErr)
+			}
+		}
 	}
 
 	branchRef := plumbing.NewBranchReferenceName(ref)
 	if err := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef, Force: true}); err == nil {
 		if err := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true, Auth: auth}); err != nil && err != git.NoErrAlreadyUpToDate {
 			log.Printf("Git pull failed (ref=%s): %v", ref, err)
+			if strings.Contains(err.Error(), "invalid auth method") && auth != nil {
+				if retryErr := worktree.Pull(&git.PullOptions{RemoteName: "origin", ReferenceName: branchRef, Force: true}); retryErr != nil && retryErr != git.NoErrAlreadyUpToDate {
+					log.Printf("Git pull retry without auth failed (ref=%s): %v", ref, retryErr)
+				}
+			}
 		}
 		head, err := repo.Head()
 		if err != nil {
