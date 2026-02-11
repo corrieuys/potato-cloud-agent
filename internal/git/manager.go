@@ -87,6 +87,17 @@ func (m *Manager) clone(gitURL, destPath string, sshKeyName string) error {
 	})
 
 	if err != nil {
+		if auth != nil && strings.Contains(err.Error(), "invalid auth method") {
+			_ = os.RemoveAll(destPath)
+			_, retryErr := git.PlainClone(destPath, false, &git.CloneOptions{
+				URL:      gitURL,
+				Progress: os.Stdout,
+			})
+			if retryErr == nil {
+				return nil
+			}
+			err = retryErr
+		}
 		return fmt.Errorf("git clone failed: %w", err)
 	}
 
