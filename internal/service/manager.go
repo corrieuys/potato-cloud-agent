@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -75,15 +76,20 @@ func (m *Manager) DeployService(service api.Service) error {
 
 	containerName := fmt.Sprintf("%s-%s", ContainerPrefix, service.ID)
 	imageTag := fmt.Sprintf("%s-%s:latest", ImagePrefix, service.ID)
+	log.Printf("[ServiceManager] Deploy start: service=%s name=%s", service.ID, service.Name)
 
 	currentInfo, exists := m.containers[service.ID]
 	if exists && currentInfo.port != 0 {
+		log.Printf("[ServiceManager] Deploy mode: blue/green service=%s activePort=%d", service.ID, currentInfo.port)
 		return m.blueGreenDeploy(service, currentInfo, containerName, imageTag)
 	}
+	log.Printf("[ServiceManager] Deploy mode: initial service=%s", service.ID)
 	return m.initialDeploy(service, containerName, imageTag)
 }
 
 func (m *Manager) initialDeploy(service api.Service, containerName, imageTag string) error {
+	start := time.Now()
+	log.Printf("[ServiceManager] Initial deploy begin: service=%s", service.ID)
 	imageID, err := m.buildServiceImage(service, imageTag)
 	if err != nil {
 		return fmt.Errorf("failed to build image: %w", err)
@@ -94,6 +100,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 		return fmt.Errorf("failed to allocate port: %w", err)
 	}
 	port := portPair.BluePort
+	log.Printf("[ServiceManager] Port allocated: service=%s hostPort=%d", service.ID, port)
 
 	env := m.prepareEnvironment(service)
 
@@ -104,17 +111,20 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	if containerPort == 0 {
 		containerPort = 8000
 	}
+	log.Printf("[ServiceManager] Container port resolved: service=%s containerPort=%d", service.ID, containerPort)
 	containerID, err := m.startContainer(containerName, imageID, port, containerPort, env, nil)
 	if err != nil {
 		m.portMgr.Release(service.ID)
 		return fmt.Errorf("failed to start container: %w", err)
 	}
+	log.Printf("[ServiceManager] Container started: service=%s container=%s id=%s", service.ID, containerName, containerID)
 
 	if err := ConnectContainerToStackNetwork(containerID, service.ID); err != nil {
 		_ = m.stopContainer(containerName)
 		m.portMgr.Release(service.ID)
 		return fmt.Errorf("failed to connect container to stack network: %w", err)
 	}
+	log.Printf("[ServiceManager] Network connected: service=%s network=stack-%s-network", service.ID, service.ID)
 
 	if err := m.healthCheck(service, containerName, port); err != nil {
 		_ = m.stopContainer(containerName)
@@ -122,6 +132,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 		m.portMgr.Release(service.ID)
 		return fmt.Errorf("health check failed: %w", err)
 	}
+	log.Printf("[ServiceManager] Health check passed: service=%s", service.ID)
 
 	if m.proxyUpdater != nil {
 		if err := m.proxyUpdater(service.ID, port); err != nil {
@@ -137,10 +148,13 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	}
 
 	m.logVerbose("Service %s deployed successfully on port %d", service.ID, port)
+	log.Printf("[ServiceManager] Initial deploy complete: service=%s hostPort=%d elapsed=%s", service.ID, port, time.Since(start))
 	return nil
 }
 
 func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInfo, containerName, imageTag string) error {
+	start := time.Now()
+	log.Printf("[ServiceManager] Blue/green deploy begin: service=%s", service.ID)
 	imageID, err := m.buildServiceImage(service, imageTag)
 	if err != nil {
 		return fmt.Errorf("failed to build new image: %w", err)
@@ -151,6 +165,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		return fmt.Errorf("service port pair not found")
 	}
 	greenPort := portPair.GreenPort
+	log.Printf("[ServiceManager] Blue/green port: service=%s greenPort=%d", service.ID, greenPort)
 
 	env := m.prepareEnvironment(service)
 	greenContainerName := containerName + "-green"
@@ -161,10 +176,12 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	if containerPort == 0 {
 		containerPort = 8000
 	}
+	log.Printf("[ServiceManager] Blue/green container port: service=%s containerPort=%d", service.ID, containerPort)
 	greenContainerID, err := m.startContainer(greenContainerName, imageID, greenPort, containerPort, env, nil)
 	if err != nil {
 		return fmt.Errorf("failed to start green container: %w", err)
 	}
+	log.Printf("[ServiceManager] Green container started: service=%s container=%s id=%s", service.ID, greenContainerName, greenContainerID)
 
 	if err := ConnectContainerToStackNetwork(greenContainerID, service.ID); err != nil {
 		_ = m.stopContainer(greenContainerName)
@@ -176,6 +193,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		_ = DisconnectContainerFromStackNetwork(greenContainerID, service.ID)
 		return fmt.Errorf("green container health check failed: %w", err)
 	}
+	log.Printf("[ServiceManager] Green health check passed: service=%s", service.ID)
 
 	if m.proxyUpdater != nil {
 		if err := m.proxyUpdater(service.ID, greenPort); err != nil {
@@ -205,10 +223,12 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	}
 
 	m.logVerbose("Blue/green deployment completed for service %s, now on port %d", service.ID, greenPort)
+	log.Printf("[ServiceManager] Blue/green deploy complete: service=%s activePort=%d elapsed=%s", service.ID, greenPort, time.Since(start))
 	return nil
 }
 
 func (m *Manager) buildServiceImage(service api.Service, imageTag string) (string, error) {
+	start := time.Now()
 	repoPath := filepath.Join(m.reposPath, service.ID)
 	contextPath := repoPath
 	if strings.TrimSpace(service.DockerContext) != "" {
@@ -234,6 +254,7 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 	} else {
 		dockerfilePath, exists = m.generator.CheckDockerfileExists(contextPath)
 	}
+	log.Printf("[ServiceManager] Build prep: service=%s context=%s dockerfile=%s exists=%t", service.ID, contextPath, dockerfilePath, exists)
 	generatedDockerfile := false
 	containerPort := service.DockerContainerPort
 	if containerPort == 0 {
@@ -243,6 +264,7 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 		containerPort = 8000
 	}
 	if !exists {
+		log.Printf("[ServiceManager] Generating Dockerfile: service=%s language=%s baseImage=%s", service.ID, service.Language, service.BaseImage)
 		dockerfileContent, err := m.generator.GenerateDockerfile(
 			service.Language,
 			service.BaseImage,
@@ -268,6 +290,7 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 		}()
 	}
 
+	log.Printf("[ServiceManager] Docker build start: service=%s image=%s", service.ID, imageTag)
 	buildCmd := exec.Command("docker", "build", "-t", imageTag, "-f", dockerfilePath, contextPath)
 	if m.verbose {
 		buildCmd.Stdout = os.Stdout
@@ -276,6 +299,7 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 	if err := buildCmd.Run(); err != nil {
 		return "", fmt.Errorf("docker build failed: %w", err)
 	}
+	log.Printf("[ServiceManager] Docker build complete: service=%s elapsed=%s", service.ID, time.Since(start))
 
 	inspectCmd := exec.Command("docker", "inspect", "--format={{.Id}}", imageTag)
 	output, err := inspectCmd.Output()
@@ -287,7 +311,9 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 	if retention <= 0 {
 		retention = imageRetentionCountDefault
 	}
+	log.Printf("[ServiceManager] Image retention: service=%s keep=%d", service.ID, retention)
 	m.cleanupOldImages(service.ID, retention)
+	log.Printf("[ServiceManager] Build done: service=%s imageID=%s totalElapsed=%s", service.ID, imageID, time.Since(start))
 	return imageID, nil
 }
 
@@ -309,6 +335,8 @@ func (m *Manager) startContainer(name, imageID string, hostPort int, containerPo
 
 	args = append(args, imageID)
 	args = append(args, command...)
+
+	log.Printf("[ServiceManager] Docker run: container=%s image=%s hostPort=%d containerPort=%d envCount=%d", name, imageID, hostPort, containerPort, len(env))
 
 	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
@@ -371,19 +399,27 @@ func (m *Manager) healthCheck(service api.Service, containerName string, port in
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := fmt.Sprintf("http://localhost:%d%s", port, healthPath)
 	deadline := time.Now().Add(HealthCheckTimeout)
+	attempts := 0
+	start := time.Now()
+	log.Printf("[ServiceManager] Health check start: service=%s url=%s interval=%s timeout=%s", service.ID, url, interval, HealthCheckTimeout)
 
 	for {
+		attempts++
 		resp, err := client.Get(url)
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			resp.Body.Close()
+			log.Printf("[ServiceManager] Health check success: service=%s attempts=%d elapsed=%s", service.ID, attempts, time.Since(start))
 			return nil
 		}
 		if resp != nil {
+			log.Printf("[ServiceManager] Health check attempt failed: service=%s attempt=%d status=%d", service.ID, attempts, resp.StatusCode)
 			resp.Body.Close()
+		} else if err != nil {
+			log.Printf("[ServiceManager] Health check attempt error: service=%s attempt=%d err=%v", service.ID, attempts, err)
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("health check timeout for %s", url)
+			return fmt.Errorf("health check timeout for %s after %d attempts", url, attempts)
 		}
 		time.Sleep(interval)
 	}
