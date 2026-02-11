@@ -42,7 +42,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		ControlPlane:       "http://localhost:8787",
 		PollInterval:       30,
-		DataDir:            "/var/lib/buildvigil",
+		DataDir:            "/var/lib/potato-cloud",
 		ExternalProxyPort:  8080,
 		SecurityMode:       "none",
 		VerboseLogging:     false,
@@ -89,7 +89,7 @@ func (c *Config) Save(path string) error {
 
 // ConfigPath returns the default configuration file path.
 func ConfigPath() string {
-	return "/etc/buildvigil/config.json"
+	return "/etc/potato-cloud/config.json"
 }
 
 // StateDBPath returns the path to the SQLite state database.

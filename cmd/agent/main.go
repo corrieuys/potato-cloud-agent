@@ -235,7 +235,7 @@ func doRegistration(controlPlane, stackID, installToken, configPath string) erro
 		StackID:           resp.StackID,
 		ControlPlane:      controlPlane,
 		PollInterval:      resp.PollInterval,
-		DataDir:           "/var/lib/buildvigil",
+		DataDir:           "/var/lib/potato-cloud",
 		ExternalProxyPort: 8080,
 		SecurityMode:      "none",
 	}

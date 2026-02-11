@@ -162,12 +162,12 @@ sudo mv potato-cloud-agent /usr/local/bin/
 sudo potato-cloud-agent -register <INSTALL_TOKEN> \
   -stack-id <STACK_ID> \
   -control-plane https://your-control-plane.workers.dev \
-  -config /etc/buildvigil/config.json
+  -config /etc/potato-cloud/config.json
 ```
 
 ## Configuration
 
-Configuration is stored in `/etc/buildvigil/config.json`:
+Configuration is stored in `/etc/potato-cloud/config.json`:
 
 ```json
 {
@@ -176,10 +176,10 @@ Configuration is stored in `/etc/buildvigil/config.json`:
   "stack_id": "uuid-of-your-stack",
   "control_plane": "https://your-control-plane.workers.dev",
   "poll_interval": 30,
-  "data_dir": "/var/lib/buildvigil",
+  "data_dir": "/var/lib/potato-cloud",
   "external_proxy_port": 8080,
   "security_mode": "none",
-  "git_ssh_key_dir": "/var/lib/buildvigil/ssh",
+  "git_ssh_key_dir": "/var/lib/potato-cloud/ssh",
   "verbose_logging": false,
   "port_range_start": 3000,
   "port_range_end": 3100,
@@ -196,10 +196,10 @@ Configuration is stored in `/etc/buildvigil/config.json`:
 | `stack_id` | Stack this agent belongs to | - |
 | `control_plane` | Control plane URL | - |
 | `poll_interval` | Config check interval (seconds) | 30 |
-| `data_dir` | Data storage directory | `/var/lib/buildvigil` |
+| `data_dir` | Data storage directory | `/var/lib/potato-cloud` |
 | `external_proxy_port` | HTTP proxy port | 8080 |
 | `security_mode` | Firewall mode: "none", "daemon-port", "blocked" | "none" |
-| `git_ssh_key_dir` | SSH keys directory | `/var/lib/buildvigil/ssh` |
+| `git_ssh_key_dir` | SSH keys directory | `/var/lib/potato-cloud/ssh` |
 | `verbose_logging` | Enable detailed logging | false |
 | `port_range_start` | First port to assign | 3000 |
 | `port_range_end` | Last port in range | 3100 |
@@ -362,8 +362,8 @@ sudo systemctl stop potato-cloud-agent
 sudo potato-cloud-agent -gen-ssh-key -ssh-key-name default
 
 # Add GitHub to known hosts
-sudo mkdir -p /var/lib/buildvigil/ssh
-sudo ssh-keyscan github.com | sudo tee -a /var/lib/buildvigil/ssh/known_hosts
+sudo mkdir -p /var/lib/potato-cloud/ssh
+sudo ssh-keyscan github.com | sudo tee -a /var/lib/potato-cloud/ssh/known_hosts
 ```
 
 ### Secret Management
@@ -399,8 +399,8 @@ sudo potato-cloud-agent -gen-ssh-key -ssh-key-name default
 
 ### 3. Add GitHub to Known Hosts
 ```bash
-sudo mkdir -p /var/lib/buildvigil/ssh
-sudo ssh-keyscan github.com | sudo tee -a /var/lib/buildvigil/ssh/known_hosts
+sudo mkdir -p /var/lib/potato-cloud/ssh
+sudo ssh-keyscan github.com | sudo tee -a /var/lib/potato-cloud/ssh/known_hosts
 ```
 
 ### 4. Configure Service
@@ -445,7 +445,7 @@ Secrets are encrypted with agent-specific keys. To migrate:
 ## Directory Structure
 
 ```
-/var/lib/buildvigil/
+/var/lib/potato-cloud/
 ├── state.db              # SQLite database
 │   ├── service_processes # Service status and metadata
 │   └── service_logs      # Application logs
@@ -499,7 +499,7 @@ sudo journalctl -u potato-cloud-agent -f
 ## Troubleshooting
 
 ### Enable Verbose Logging
-Edit `/etc/buildvigil/config.json`:
+Edit `/etc/potato-cloud/config.json`:
 ```json
 {
   "verbose_logging": true
