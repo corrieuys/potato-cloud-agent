@@ -315,6 +315,7 @@ func (a *Agent) Run() {
 	}
 	a.heartbeatMu.Unlock()
 	heartbeatTicker := time.NewTicker(time.Duration(currentHeartbeatInterval) * time.Second)
+	lastHeartbeatInterval := currentHeartbeatInterval
 	defer heartbeatTicker.Stop()
 
 	for {
@@ -326,12 +327,14 @@ func (a *Agent) Run() {
 			if err := a.sync(); err != nil {
 				log.Printf("Sync failed: %v", err)
 			}
-			// Check if heartbeat interval changed and reset ticker if needed
+			// Reset heartbeat ticker only when interval actually changes.
+			// If poll interval < heartbeat interval, resetting every sync would prevent heartbeats.
 			a.heartbeatMu.Lock()
 			currentInterval := a.heartbeatInterval
 			a.heartbeatMu.Unlock()
-			if currentInterval > 0 {
+			if currentInterval > 0 && currentInterval != lastHeartbeatInterval {
 				heartbeatTicker.Reset(time.Duration(currentInterval) * time.Second)
+				lastHeartbeatInterval = currentInterval
 			}
 		case <-heartbeatTicker.C:
 			a.logVerbosef("Heartbeat tick")
