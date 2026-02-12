@@ -247,28 +247,29 @@ func applyConfigOverrides(cfg *config.Config, configPath string, agentID, stackI
 
 // Agent is the main agent structure
 type Agent struct {
-	config        *config.Config
-	state         *state.Manager
-	git           *git.Manager
-	services      *service.Manager
-	api           *api.Client
-	externalProxy *proxy.ExternalProxy
-	internalProxy *proxy.InternalProxy
-	dnsMgr        *proxy.DNSManager
-	fwMgr         *firewall.Manager
-	stopChan      chan struct{}
-	applyFirewall bool
-	currentMode   string
-	healthPort    int
-	heartbeatMu   sync.Mutex
-	lifecycleMu   sync.RWMutex
-	lifecycle     map[string]api.ServiceStatus
+	config            *config.Config
+	state             *state.Manager
+	git               *git.Manager
+	services          *service.Manager
+	api               *api.Client
+	externalProxy     *proxy.ExternalProxy
+	internalProxy     *proxy.InternalProxy
+	dnsMgr            *proxy.DNSManager
+	fwMgr             *firewall.Manager
+	stopChan          chan struct{}
+	applyFirewall     bool
+	currentMode       string
+	healthPort        int
+	heartbeatMu       sync.Mutex
+	heartbeatInterval int
+	lifecycleMu       sync.RWMutex
+	lifecycle         map[string]api.ServiceStatus
 }
 
 // Run starts the agent main loop
 func (a *Agent) Run() {
 	a.stopChan = make(chan struct{})
-	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds", a.config.PollInterval, 30)
+	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds (default, will update from desired state)", a.config.PollInterval, 30)
 
 	if a.externalProxy != nil {
 		go func() {
@@ -299,8 +300,9 @@ func (a *Agent) Run() {
 	ticker := time.NewTicker(time.Duration(a.config.PollInterval) * time.Second)
 	defer ticker.Stop()
 
-	// Start heartbeat loop (every 30 seconds)
-	heartbeatTicker := time.NewTicker(30 * time.Second)
+	// Start heartbeat loop with default interval
+	a.heartbeatInterval = 30
+	heartbeatTicker := time.NewTicker(time.Duration(a.heartbeatInterval) * time.Second)
 	defer heartbeatTicker.Stop()
 
 	for {
@@ -311,6 +313,13 @@ func (a *Agent) Run() {
 			a.logVerbosef("Sync tick")
 			if err := a.sync(); err != nil {
 				log.Printf("Sync failed: %v", err)
+			}
+			// Check if heartbeat interval changed and reset ticker if needed
+			a.heartbeatMu.Lock()
+			currentInterval := a.heartbeatInterval
+			a.heartbeatMu.Unlock()
+			if currentInterval > 0 {
+				heartbeatTicker.Reset(time.Duration(currentInterval) * time.Second)
 			}
 		case <-heartbeatTicker.C:
 			a.logVerbosef("Heartbeat tick")
@@ -365,7 +374,21 @@ func (a *Agent) sync() error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch desired state: %w", err)
 	}
-	a.logVerbosef("Desired state received: version=%d hash=%s services=%d mode=%s poll_interval=%d", desired.Version, desired.Hash, len(desired.Services), desired.SecurityMode, desired.PollInterval)
+	a.logVerbosef("Desired state received: version=%d hash=%s services=%d mode=%s poll_interval=%d heartbeat_interval=%d", desired.Version, desired.Hash, len(desired.Services), desired.SecurityMode, desired.PollInterval, desired.HeartbeatInterval)
+
+	// Update heartbeat interval from desired state (validate range: 30-300 seconds)
+	newInterval := desired.HeartbeatInterval
+	if newInterval < 30 {
+		newInterval = 30
+	} else if newInterval > 300 {
+		newInterval = 300
+	}
+	a.heartbeatMu.Lock()
+	if a.heartbeatInterval != newInterval {
+		log.Printf("Heartbeat interval changed: %d -> %d seconds", a.heartbeatInterval, newInterval)
+		a.heartbeatInterval = newInterval
+	}
+	a.heartbeatMu.Unlock()
 
 	// Check if we need to apply changes
 	applied, err := a.state.GetAppliedState()
@@ -609,7 +632,11 @@ func (a *Agent) sendHeartbeat() error {
 
 	a.lifecycleMu.RLock()
 	for serviceID, lifecycleStatus := range a.lifecycle {
-		statusByService[serviceID] = lifecycleStatus
+		// Only override with lifecycle status if process is not actually running
+		// This prevents stale "building" statuses from overriding "running"
+		if existing, ok := statusByService[serviceID]; !ok || existing.Status != "running" {
+			statusByService[serviceID] = lifecycleStatus
+		}
 	}
 	a.lifecycleMu.RUnlock()
 

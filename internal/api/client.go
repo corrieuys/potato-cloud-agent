@@ -87,6 +87,7 @@ type DesiredState struct {
 	Version           int       `json:"version"`
 	Hash              string    `json:"hash"`
 	PollInterval      int       `json:"poll_interval"`
+	HeartbeatInterval int       `json:"heartbeat_interval"`
 	SecurityMode      string    `json:"security_mode"`
 	ExternalProxyPort int       `json:"external_proxy_port"`
 	Services          []Service `json:"services"`

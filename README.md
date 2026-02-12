@@ -120,7 +120,7 @@ Generated Dockerfiles:
 - Runs automatically after successful deployments
 
 ### 🌐 Built-in Proxy & DNS
-- External proxy routes HTTP traffic by path
+- External proxy routes HTTP traffic by hostname (Host header)
 - Internal DNS for service-to-service communication
 - No need for external reverse proxy (nginx/traefik)
 
@@ -313,7 +313,7 @@ Services are configured via the control plane dashboard. The agent expects this 
   "git_commit": "abc123",
   "base_image": "node:20-alpine",
   "language": "nodejs",
-  "external_path": "/api",
+  "hostname": "api.example.com",
   "health_check_path": "/health",
   "environment_vars": {
     "NODE_ENV": "production"
@@ -333,7 +333,7 @@ Services are configured via the control plane dashboard. The agent expects this 
 - `git_commit`: Pin to specific commit
 - `base_image`: Override default base image
 - `language`: Language/runtime ("nodejs", "golang", "python", "rust", "java", "generic", "auto")
-- `external_path`: External URL path for routing
+- `hostname`: Full domain name for external routing (e.g., "api.example.com")
 - `health_check_path`: HTTP path for health checks
 - `environment_vars`: Non-sensitive environment variables
 
