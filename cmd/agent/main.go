@@ -632,9 +632,7 @@ func (a *Agent) sendHeartbeat() error {
 
 	a.lifecycleMu.RLock()
 	for serviceID, lifecycleStatus := range a.lifecycle {
-		// Only override with lifecycle status if process is not actually running
-		// This prevents stale "building" statuses from overriding "running"
-		if existing, ok := statusByService[serviceID]; !ok || existing.Status != "running" {
+		if existing, ok := statusByService[serviceID]; !ok || shouldPreferLifecycleStatus(existing.Status, lifecycleStatus.Status) {
 			statusByService[serviceID] = lifecycleStatus
 		}
 	}
@@ -688,6 +686,17 @@ func (a *Agent) sendHeartbeat() error {
 func (a *Agent) logVerbosef(format string, args ...interface{}) {
 	if a.config != nil && a.config.VerboseLogging {
 		log.Printf(format, args...)
+	}
+}
+
+func shouldPreferLifecycleStatus(processStatus, lifecycleStatus string) bool {
+	switch strings.TrimSpace(lifecycleStatus) {
+	case "building", "deploying", "health_check", "error", "crashed", "stopped":
+		return true
+	case "running":
+		return strings.TrimSpace(processStatus) != "running"
+	default:
+		return strings.TrimSpace(processStatus) == "" || strings.TrimSpace(processStatus) == "unknown"
 	}
 }
 
