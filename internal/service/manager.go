@@ -205,8 +205,12 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	if !exists {
 		return fmt.Errorf("service port pair not found")
 	}
-	greenPort := portPair.GreenPort
-	log.Printf("[ServiceManager] Blue/green port: service=%s greenPort=%d", service.ID, greenPort)
+	targetPort, err := selectBlueGreenTargetPort(currentInfo.port, portPair)
+	if err != nil {
+		m.reportLifecycle(service, "error", "unknown", err.Error())
+		return err
+	}
+	log.Printf("[ServiceManager] Blue/green port: service=%s activePort=%d targetPort=%d", service.ID, currentInfo.port, targetPort)
 
 	env := m.prepareEnvironment(service)
 	if err := validateDockerRunArgs(service); err != nil {
@@ -222,7 +226,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		containerPort = 8000
 	}
 	log.Printf("[ServiceManager] Blue/green container port: service=%s containerPort=%d", service.ID, containerPort)
-	greenContainerID, err := m.startContainer(greenContainerName, imageRef, greenPort, containerPort, env, parseDockerRunArgs(service), containerCommandForService(service))
+	greenContainerID, err := m.startContainer(greenContainerName, imageRef, targetPort, containerPort, env, parseDockerRunArgs(service), containerCommandForService(service))
 	if err != nil {
 		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to start green container: %w", err)
@@ -236,7 +240,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	}
 
 	m.reportLifecycle(service, "health_check", "unknown", "")
-	if err := m.healthCheck(service, greenContainerName, greenPort); err != nil {
+	if err := m.healthCheck(service, greenContainerName, targetPort); err != nil {
 		_ = m.stopContainer(greenContainerName)
 		_ = DisconnectContainerFromStackNetwork(greenContainerID, service.ID)
 		m.reportLifecycle(service, "error", "unhealthy", err.Error())
@@ -245,7 +249,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	log.Printf("[ServiceManager] Green health check passed: service=%s", service.ID)
 
 	if m.proxyUpdater != nil {
-		if err := m.proxyUpdater(service.ID, greenPort); err != nil {
+		if err := m.proxyUpdater(service.ID, targetPort); err != nil {
 			m.logVerbose("Failed to update proxy routes to green: %v", err)
 		}
 	}
@@ -265,11 +269,11 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	}
 
 	m.containers[service.ID] = &containerInfo{
-		service:       service,
-		containerName: activeContainerName,
-		imageTag:      imageRef,
-		port:          greenPort,
-	}
+			service:       service,
+			containerName: activeContainerName,
+			imageTag:      imageRef,
+			port:          targetPort,
+		}
 
 	if err := m.state.SaveServiceProcess(&state.ServiceProcess{
 		ServiceID:     service.ID,
@@ -279,9 +283,9 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		ContainerID:   greenContainerID,
 		ContainerName: activeContainerName,
 		ImageTag:      imageRef,
-		Port:          portPair.BluePort,
-		GreenPort:     portPair.GreenPort,
-		ActivePort:    greenPort,
+			Port:          portPair.BluePort,
+			GreenPort:     portPair.GreenPort,
+			ActivePort:    targetPort,
 		BaseImage:     service.BaseImage,
 		Language:      service.Language,
 		Status:        "running",
@@ -291,9 +295,26 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	}
 	m.reportLifecycle(service, "running", runningHealthStatus(service), "")
 
-	m.logVerbose("Blue/green deployment completed for service %s, now on port %d", service.ID, greenPort)
-	log.Printf("[ServiceManager] Blue/green deploy complete: service=%s activePort=%d elapsed=%s", service.ID, greenPort, time.Since(start))
+	m.logVerbose("Blue/green deployment completed for service %s, now on port %d", service.ID, targetPort)
+	log.Printf("[ServiceManager] Blue/green deploy complete: service=%s activePort=%d elapsed=%s", service.ID, targetPort, time.Since(start))
 	return nil
+}
+
+func selectBlueGreenTargetPort(activePort int, pair containerpkg.PortPair) (int, error) {
+	if pair.BluePort <= 0 || pair.GreenPort <= 0 {
+		return 0, fmt.Errorf("invalid service port pair: blue=%d green=%d", pair.BluePort, pair.GreenPort)
+	}
+	if activePort == pair.BluePort {
+		return pair.GreenPort, nil
+	}
+	if activePort == pair.GreenPort {
+		return pair.BluePort, nil
+	}
+	if activePort == 0 {
+		// Defensive fallback for inconsistent in-memory state.
+		return pair.GreenPort, nil
+	}
+	return 0, fmt.Errorf("active port %d does not match allocated pair blue=%d green=%d", activePort, pair.BluePort, pair.GreenPort)
 }
 
 func (m *Manager) buildServiceImage(service api.Service, imageTag string) (string, error) {
