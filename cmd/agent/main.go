@@ -469,30 +469,35 @@ func (a *Agent) sync() error {
 			}
 		}
 
-		needsDeploy := false
-		if !exists {
-			needsDeploy = true
+		proc, _ := a.state.GetServiceProcess(svc.ID)
+		needsDeploy := !exists || proc == nil || proc.Status != "running"
+		resolvedCommit := ""
+		if proc != nil {
+			resolvedCommit = proc.GitCommit
 		}
 
 		if stateChanged || needsDeploy {
-			a.onServiceLifecycleEvent(svc, "building", "unknown", "")
-			resolvedCommit := serviceRevisionSignature(svc)
 			if !isDockerServiceType(svc.ServiceType) {
-				var err error
-				resolvedCommit, err = a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
-				if err != nil {
-					a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
-					log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
-					hadErrors = true
-					continue
+				shouldSyncRepo := needsDeploy || proc == nil || strings.TrimSpace(svc.GitCommit) != "" || strings.TrimSpace(resolvedCommit) == ""
+				if shouldSyncRepo {
+					var err error
+					resolvedCommit, err = a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
+					if err != nil {
+						a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
+						log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
+						hadErrors = true
+						continue
+					}
 				}
+			} else {
+				resolvedCommit = serviceRevisionSignature(svc)
 			}
 			svc.GitCommit = resolvedCommit
 
-			proc, _ := a.state.GetServiceProcess(svc.ID)
 			needsDeploy = needsDeploy || proc == nil || proc.GitCommit != resolvedCommit || proc.Status != "running"
 
 			if needsDeploy {
+				a.onServiceLifecycleEvent(svc, "building", "unknown", "")
 				log.Printf("Deploying service: name=%s service=%s reason=%s", svc.Name, svc.ID, deployReason(stateChanged, exists, proc, resolvedCommit))
 				if err := a.services.DeployService(svc); err != nil {
 					a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
@@ -500,6 +505,8 @@ func (a *Agent) sync() error {
 					hadErrors = true
 					continue
 				}
+			} else {
+				a.clearTransientLifecycleStatus(svc.ID)
 			}
 
 			assignedPort, exists = a.services.GetServicePort(svc.ID)
@@ -508,6 +515,8 @@ func (a *Agent) sync() error {
 				hadErrors = true
 				continue
 			}
+		} else {
+			a.clearTransientLifecycleStatus(svc.ID)
 		}
 
 		if !exists {
@@ -697,6 +706,20 @@ func shouldPreferLifecycleStatus(processStatus, lifecycleStatus string) bool {
 		return strings.TrimSpace(processStatus) != "running"
 	default:
 		return strings.TrimSpace(processStatus) == "" || strings.TrimSpace(processStatus) == "unknown"
+	}
+}
+
+func (a *Agent) clearTransientLifecycleStatus(serviceID string) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+
+	current, exists := a.lifecycle[serviceID]
+	if !exists {
+		return
+	}
+	switch strings.TrimSpace(current.Status) {
+	case "building", "deploying", "health_check":
+		delete(a.lifecycle, serviceID)
 	}
 }
 
