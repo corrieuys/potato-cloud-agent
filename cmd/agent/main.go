@@ -269,7 +269,13 @@ type Agent struct {
 // Run starts the agent main loop
 func (a *Agent) Run() {
 	a.stopChan = make(chan struct{})
-	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds (default, will update from desired state)", a.config.PollInterval, 30)
+	a.heartbeatMu.Lock()
+	if a.heartbeatInterval <= 0 {
+		a.heartbeatInterval = 30
+	}
+	initialHeartbeatInterval := a.heartbeatInterval
+	a.heartbeatMu.Unlock()
+	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds (initial, may update from desired state)", a.config.PollInterval, initialHeartbeatInterval)
 
 	if a.externalProxy != nil {
 		go func() {
@@ -300,9 +306,15 @@ func (a *Agent) Run() {
 	ticker := time.NewTicker(time.Duration(a.config.PollInterval) * time.Second)
 	defer ticker.Stop()
 
-	// Start heartbeat loop with default interval
-	a.heartbeatInterval = 30
-	heartbeatTicker := time.NewTicker(time.Duration(a.heartbeatInterval) * time.Second)
+	// Start heartbeat loop with the current interval (possibly updated by initial sync)
+	a.heartbeatMu.Lock()
+	currentHeartbeatInterval := a.heartbeatInterval
+	if currentHeartbeatInterval <= 0 {
+		currentHeartbeatInterval = 30
+		a.heartbeatInterval = currentHeartbeatInterval
+	}
+	a.heartbeatMu.Unlock()
+	heartbeatTicker := time.NewTicker(time.Duration(currentHeartbeatInterval) * time.Second)
 	defer heartbeatTicker.Stop()
 
 	for {
