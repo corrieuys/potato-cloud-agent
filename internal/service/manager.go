@@ -668,6 +668,7 @@ func (m *Manager) RecoverService(service api.Service) (int, bool, error) {
 	bluePort := 0
 	greenPort := 0
 	imageTagFromState := ""
+	gitCommitFromState := ""
 
 	if proc != nil {
 		if proc.ContainerName != "" {
@@ -675,6 +676,9 @@ func (m *Manager) RecoverService(service api.Service) (int, bool, error) {
 		}
 		if proc.ImageTag != "" {
 			imageTagFromState = proc.ImageTag
+		}
+		if proc.GitCommit != "" {
+			gitCommitFromState = proc.GitCommit
 		}
 		if proc.ActivePort > 0 {
 			activePort = proc.ActivePort
@@ -743,6 +747,10 @@ func (m *Manager) RecoverService(service api.Service) (int, bool, error) {
 	if imageTagFromState != "" {
 		imageTag = imageTagFromState
 	}
+	gitCommit := service.GitCommit
+	if strings.TrimSpace(gitCommit) == "" && strings.TrimSpace(gitCommitFromState) != "" {
+		gitCommit = gitCommitFromState
+	}
 
 	if err := m.portMgr.Reserve(service.ID, containerpkg.PortPair{BluePort: bluePort, GreenPort: greenPort}); err != nil {
 		m.logVerbose("Port reserve failed during recovery for %s: %v", service.ID, err)
@@ -758,7 +766,7 @@ func (m *Manager) RecoverService(service api.Service) (int, bool, error) {
 	if err := m.state.SaveServiceProcess(&state.ServiceProcess{
 		ServiceID:     service.ID,
 		ServiceName:   service.Name,
-		GitCommit:     service.GitCommit,
+		GitCommit:     gitCommit,
 		Runtime:       "docker",
 		ContainerName: containerName,
 		ImageTag:      imageTag,
