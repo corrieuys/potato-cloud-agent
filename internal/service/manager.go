@@ -693,9 +693,29 @@ func (m *Manager) RecoverService(service api.Service) (int, bool, error) {
 		return 0, false, nil
 	}
 
-	if bluePort == 0 {
-		bluePort = activePort
+	// IMPORTANT: Use the ALLOCATED port pair, not Docker's mapped port.
+	// The port manager allocated (blue, green) = (even, odd) ports.
+	// Docker's port mapping (HostPort) may differ from our allocation.
+	// We must use the allocated ports to maintain consistency.
+	allocatedPair, exists := m.portMgr.Get(service.ID)
+	if !exists {
+		// Port pair not found in memory, fallback to calculating from Docker mapping
+		// This shouldn't happen in normal operation
+		if bluePort == 0 {
+			if activePort%2 == 0 {
+				bluePort = activePort
+				greenPort = activePort + 1
+			} else {
+				bluePort = activePort - 1
+				greenPort = activePort
+			}
+		}
+	} else {
+		// Use the allocated port pair
+		bluePort = allocatedPair.BluePort
+		greenPort = allocatedPair.GreenPort
 	}
+
 	if greenPort == 0 {
 		greenPort = bluePort + 1
 	}
