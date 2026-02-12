@@ -31,7 +31,7 @@ func TestGetDesiredState_Success(t *testing.T) {
 				GitRef:          "main",
 				GitCommit:       "def456",
 				Language:        "golang",
-				ExternalPath:    "/api",
+				Hostname:        "api.example.com",
 				HealthCheckPath: "/health",
 				EnvironmentVars: map[string]string{
 					"PORT": "3000",

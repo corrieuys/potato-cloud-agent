@@ -453,12 +453,16 @@ func (a *Agent) sync() error {
 
 		if stateChanged || needsDeploy {
 			a.onServiceLifecycleEvent(svc, "building", "unknown", "")
-			resolvedCommit, err := a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
-			if err != nil {
-				a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
-				log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
-				hadErrors = true
-				continue
+			resolvedCommit := serviceRevisionSignature(svc)
+			if !isDockerServiceType(svc.ServiceType) {
+				var err error
+				resolvedCommit, err = a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
+				if err != nil {
+					a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
+					log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
+					hadErrors = true
+					continue
+				}
 			}
 			svc.GitCommit = resolvedCommit
 
@@ -489,9 +493,9 @@ func (a *Agent) sync() error {
 			continue
 		}
 
-		// Build routes
-		if svc.ExternalPath != "" {
-			externalRoutes[svc.ExternalPath] = assignedPort
+		// Build routes (hostname-based routing)
+		if svc.Hostname != "" {
+			externalRoutes[svc.Hostname] = assignedPort
 		}
 		internalRoutes[svc.Name] = assignedPort
 	}
@@ -700,6 +704,17 @@ func deployReason(stateChanged bool, serviceFound bool, proc *state.ServiceProce
 		return "state_changed"
 	}
 	return "unknown"
+}
+
+func isDockerServiceType(serviceType string) bool {
+	return strings.EqualFold(strings.TrimSpace(serviceType), "docker")
+}
+
+func serviceRevisionSignature(svc api.Service) string {
+	if isDockerServiceType(svc.ServiceType) {
+		return fmt.Sprintf("docker:%s|args:%s|cmd:%s", strings.TrimSpace(svc.DockerImage), strings.TrimSpace(svc.DockerRunArgs), strings.TrimSpace(svc.RunCommand))
+	}
+	return svc.GitCommit
 }
 
 func (a *Agent) getExternalExposure() string {

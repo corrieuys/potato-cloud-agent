@@ -100,10 +100,10 @@ func (m *Manager) DeployService(service api.Service) error {
 func (m *Manager) initialDeploy(service api.Service, containerName, imageTag string) error {
 	start := time.Now()
 	log.Printf("[ServiceManager] Initial deploy begin: service=%s", service.ID)
-	imageID, err := m.buildServiceImage(service, imageTag)
+	imageRef, err := m.resolveDeployImage(service, imageTag)
 	if err != nil {
 		m.reportLifecycle(service, "error", "unknown", err.Error())
-		return fmt.Errorf("failed to build image: %w", err)
+		return fmt.Errorf("failed to prepare image: %w", err)
 	}
 
 	portPair, err := m.portMgr.Allocate(service.ID)
@@ -114,6 +114,11 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	log.Printf("[ServiceManager] Port allocated: service=%s hostPort=%d", service.ID, port)
 
 	env := m.prepareEnvironment(service)
+	if err := validateDockerRunArgs(service); err != nil {
+		m.portMgr.Release(service.ID)
+		m.reportLifecycle(service, "error", "unknown", err.Error())
+		return err
+	}
 
 	containerPort := service.DockerContainerPort
 	if containerPort == 0 {
@@ -123,7 +128,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 		containerPort = 8000
 	}
 	log.Printf("[ServiceManager] Container port resolved: service=%s containerPort=%d", service.ID, containerPort)
-	containerID, err := m.startContainer(containerName, imageID, port, containerPort, env, nil)
+	containerID, err := m.startContainer(containerName, imageRef, port, containerPort, env, parseDockerRunArgs(service), containerCommandForService(service))
 	if err != nil {
 		m.portMgr.Release(service.ID)
 		m.reportLifecycle(service, "error", "unknown", err.Error())
@@ -158,7 +163,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 	m.containers[service.ID] = &containerInfo{
 		service:       service,
 		containerName: containerName,
-		imageTag:      imageTag,
+		imageTag:      imageRef,
 		port:          port,
 	}
 
@@ -169,7 +174,7 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 		Runtime:       "docker",
 		ContainerID:   containerID,
 		ContainerName: containerName,
-		ImageTag:      imageTag,
+		ImageTag:      imageRef,
 		Port:          portPair.BluePort,
 		GreenPort:     portPair.GreenPort,
 		ActivePort:    port,
@@ -190,10 +195,10 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInfo, containerName, imageTag string) error {
 	start := time.Now()
 	log.Printf("[ServiceManager] Blue/green deploy begin: service=%s", service.ID)
-	imageID, err := m.buildServiceImage(service, imageTag)
+	imageRef, err := m.resolveDeployImage(service, imageTag)
 	if err != nil {
 		m.reportLifecycle(service, "error", "unknown", err.Error())
-		return fmt.Errorf("failed to build new image: %w", err)
+		return fmt.Errorf("failed to prepare new image: %w", err)
 	}
 
 	portPair, exists := m.portMgr.Get(service.ID)
@@ -204,6 +209,10 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	log.Printf("[ServiceManager] Blue/green port: service=%s greenPort=%d", service.ID, greenPort)
 
 	env := m.prepareEnvironment(service)
+	if err := validateDockerRunArgs(service); err != nil {
+		m.reportLifecycle(service, "error", "unknown", err.Error())
+		return err
+	}
 	greenContainerName := containerName + "-green"
 	containerPort := service.DockerContainerPort
 	if containerPort == 0 {
@@ -213,7 +222,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		containerPort = 8000
 	}
 	log.Printf("[ServiceManager] Blue/green container port: service=%s containerPort=%d", service.ID, containerPort)
-	greenContainerID, err := m.startContainer(greenContainerName, imageID, greenPort, containerPort, env, nil)
+	greenContainerID, err := m.startContainer(greenContainerName, imageRef, greenPort, containerPort, env, parseDockerRunArgs(service), containerCommandForService(service))
 	if err != nil {
 		m.reportLifecycle(service, "error", "unknown", err.Error())
 		return fmt.Errorf("failed to start green container: %w", err)
@@ -258,7 +267,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 	m.containers[service.ID] = &containerInfo{
 		service:       service,
 		containerName: activeContainerName,
-		imageTag:      imageTag,
+		imageTag:      imageRef,
 		port:          greenPort,
 	}
 
@@ -269,7 +278,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		Runtime:       "docker",
 		ContainerID:   greenContainerID,
 		ContainerName: activeContainerName,
-		ImageTag:      imageTag,
+		ImageTag:      imageRef,
 		Port:          portPair.BluePort,
 		GreenPort:     portPair.GreenPort,
 		ActivePort:    greenPort,
@@ -377,6 +386,34 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 	return imageID, nil
 }
 
+func (m *Manager) pullDockerImage(imageRef string) error {
+	log.Printf("[ServiceManager] Docker pull start: image=%s", imageRef)
+	cmd := exec.Command("docker", "pull", imageRef)
+	if m.verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker pull failed: %w", err)
+	}
+	log.Printf("[ServiceManager] Docker pull complete: image=%s", imageRef)
+	return nil
+}
+
+func (m *Manager) resolveDeployImage(service api.Service, imageTag string) (string, error) {
+	if strings.EqualFold(strings.TrimSpace(service.ServiceType), "docker") {
+		imageRef := strings.TrimSpace(service.DockerImage)
+		if imageRef == "" {
+			return "", fmt.Errorf("docker_image is required for docker service type")
+		}
+		if err := m.pullDockerImage(imageRef); err != nil {
+			return "", err
+		}
+		return imageRef, nil
+	}
+	return m.buildServiceImage(service, imageTag)
+}
+
 func (m *Manager) prepareEnvironment(service api.Service) []string {
 	env := make([]string, 0, len(service.EnvironmentVars))
 	for key, value := range service.EnvironmentVars {
@@ -385,7 +422,7 @@ func (m *Manager) prepareEnvironment(service api.Service) []string {
 	return env
 }
 
-func (m *Manager) startContainer(name, imageID string, hostPort int, containerPort int, env []string, command []string) (string, error) {
+func (m *Manager) startContainer(name, imageID string, hostPort int, containerPort int, env []string, runArgs []string, command []string) (string, error) {
 	if containerExists(name) {
 		log.Printf("[ServiceManager] Existing container found, removing: %s", name)
 		if err := stopContainer(name); err != nil {
@@ -394,6 +431,7 @@ func (m *Manager) startContainer(name, imageID string, hostPort int, containerPo
 	}
 	portBinding := fmt.Sprintf("%d:%d", hostPort, containerPort)
 	args := []string{"run", "-d", "--name", name, "-p", portBinding}
+	args = append(args, runArgs...)
 
 	for _, e := range env {
 		args = append(args, "-e", e)
@@ -411,6 +449,57 @@ func (m *Manager) startContainer(name, imageID string, hostPort int, containerPo
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+func parseDockerRunArgs(service api.Service) []string {
+	if strings.EqualFold(strings.TrimSpace(service.ServiceType), "docker") {
+		args := strings.Fields(strings.TrimSpace(service.DockerRunArgs))
+		if len(args) > 0 {
+			return args
+		}
+	}
+	return nil
+}
+
+func validateDockerRunArgs(service api.Service) error {
+	if !strings.EqualFold(strings.TrimSpace(service.ServiceType), "docker") {
+		return nil
+	}
+	args := strings.Fields(strings.TrimSpace(service.DockerRunArgs))
+	forbidden := map[string]struct{}{
+		"-d":         {},
+		"--detach":   {},
+		"--name":     {},
+		"-p":         {},
+		"--publish":  {},
+		"--network":  {},
+		"--hostname": {},
+	}
+	for _, arg := range args {
+		key := arg
+		if idx := strings.Index(arg, "="); idx > 0 {
+			key = arg[:idx]
+		}
+		if _, blocked := forbidden[key]; blocked {
+			return fmt.Errorf("docker_run_args contains disallowed option %q; agent manages name/port/network", key)
+		}
+	}
+	return nil
+}
+
+func containerCommandForService(service api.Service) []string {
+	if !strings.EqualFold(strings.TrimSpace(service.ServiceType), "docker") {
+		return nil
+	}
+	return parseContainerCommand(service.RunCommand)
+}
+
+func parseContainerCommand(runCommand string) []string {
+	trimmed := strings.TrimSpace(runCommand)
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Fields(trimmed)
 }
 
 func (m *Manager) stopContainer(name string) error {

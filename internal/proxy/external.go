@@ -11,27 +11,25 @@ import (
 	"time"
 )
 
-// ExternalProxy routes incoming HTTP requests to services.
+// ExternalProxy routes incoming HTTP requests to services based on Host header.
 type ExternalProxy struct {
-	port        int
-	bindAddr    string
-	routes      map[string]int
-	stackRoutes map[string]map[string]int
-	server      *http.Server
-	mu          sync.RWMutex
+	port     int
+	bindAddr string
+	routes   map[string]int // hostname -> port
+	server   *http.Server
+	mu       sync.RWMutex
 }
 
 // NewExternalProxy creates a new external reverse proxy.
 func NewExternalProxy(port int, bindAddr string) *ExternalProxy {
 	return &ExternalProxy{
-		port:        port,
-		bindAddr:    bindAddr,
-		routes:      make(map[string]int),
-		stackRoutes: make(map[string]map[string]int),
+		port:     port,
+		bindAddr: bindAddr,
+		routes:   make(map[string]int),
 	}
 }
 
-// UpdateRoutes updates the global routing table.
+// UpdateRoutes updates the routing table (hostname -> port).
 func (p *ExternalProxy) UpdateRoutes(routes map[string]int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -41,18 +39,6 @@ func (p *ExternalProxy) UpdateRoutes(routes map[string]int) {
 		next[k] = v
 	}
 	p.routes = next
-}
-
-// UpdateStackRoutes updates stack-specific routes.
-func (p *ExternalProxy) UpdateStackRoutes(stackID string, routes map[string]int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	next := make(map[string]int, len(routes))
-	for k, v := range routes {
-		next[k] = v
-	}
-	p.stackRoutes[stackID] = next
 }
 
 // Start starts the proxy server.
@@ -81,158 +67,36 @@ func (p *ExternalProxy) Stop() error {
 }
 
 func (p *ExternalProxy) handleRequest(w http.ResponseWriter, r *http.Request) {
-	stackID := extractStackID(r.Host)
+	// Extract hostname from Host header (remove port if present)
+	host := r.Host
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
 
 	p.mu.RLock()
-	matchedPath, matchedPort, useStackHost := longestPrefixMatch(r.URL.Path, p.routes, nil)
-	if stackID != "" {
-		if stackSpecific, ok := p.stackRoutes[stackID]; ok {
-			stackPath, stackPort, _ := longestPrefixMatch(r.URL.Path, nil, stackSpecific)
-			if len(stackPath) > len(matchedPath) {
-				matchedPath = stackPath
-				matchedPort = stackPort
-				useStackHost = true
-			}
-		}
-	}
+	port, exists := p.routes[host]
 	p.mu.RUnlock()
 
-	if matchedPort == 0 {
-		http.Error(w, "No route found", http.StatusNotFound)
+	if !exists {
+		http.Error(w, "No route found for hostname: "+host, http.StatusNotFound)
 		return
 	}
 
-	targetHost := "127.0.0.1"
-	if useStackHost && stackID != "" {
-		targetHost = fmt.Sprintf("stack-%s.svc.internal", stackID)
-	}
-
-	targetURL, err := url.Parse(fmt.Sprintf("http://%s:%d", targetHost, matchedPort))
+	targetURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
 	if err != nil {
 		http.Error(w, "Invalid target URL", http.StatusInternalServerError)
 		return
 	}
+
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-	r.URL.Path = strings.TrimPrefix(r.URL.Path, matchedPath)
-	if !strings.HasPrefix(r.URL.Path, "/") {
-		r.URL.Path = "/" + r.URL.Path
-	}
-
+	// Set forwarding headers
 	r.Header.Set("X-Forwarded-Host", r.Host)
 	r.Header.Set("X-Forwarded-Proto", "http")
 	r.Header.Set("X-Forwarded-For", r.RemoteAddr)
 
+	// Full path is preserved (no path stripping)
 	proxy.ServeHTTP(w, r)
-}
-
-func longestPrefixMatch(path string, global map[string]int, stack map[string]int) (string, int, bool) {
-	var matchedPath string
-	var matchedPort int
-	useStackHost := false
-
-	for route, port := range global {
-		if strings.HasPrefix(path, route) && len(route) > len(matchedPath) {
-			matchedPath = route
-			matchedPort = port
-			useStackHost = false
-		}
-	}
-	for route, port := range stack {
-		if strings.HasPrefix(path, route) && len(route) > len(matchedPath) {
-			matchedPath = route
-			matchedPort = port
-			useStackHost = true
-		}
-	}
-
-	return matchedPath, matchedPort, useStackHost
-}
-
-func extractStackID(host string) string {
-	name := host
-	if idx := strings.Index(name, ":"); idx != -1 {
-		name = name[:idx]
-	}
-
-	hostParts := strings.Split(name, ".")
-	if len(hostParts) == 0 {
-		return ""
-	}
-	if !strings.HasPrefix(hostParts[0], "stack-") {
-		return ""
-	}
-	return strings.TrimPrefix(hostParts[0], "stack-")
-}
-
-// AddStackRoute adds a route for a specific stack.
-func (p *ExternalProxy) AddStackRoute(stackID, path string, port int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if _, exists := p.stackRoutes[stackID]; !exists {
-		p.stackRoutes[stackID] = make(map[string]int)
-	}
-	p.stackRoutes[stackID][path] = port
-}
-
-// RemoveStackRoute removes a route for a specific stack.
-func (p *ExternalProxy) RemoveStackRoute(stackID, path string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if routes, exists := p.stackRoutes[stackID]; exists {
-		delete(routes, path)
-		if len(routes) == 0 {
-			delete(p.stackRoutes, stackID)
-		}
-	}
-}
-
-// ClearStackRoutes clears all routes for a specific stack.
-func (p *ExternalProxy) ClearStackRoutes(stackID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.stackRoutes, stackID)
-}
-
-// GetStackRoutes returns all routes for a specific stack.
-func (p *ExternalProxy) GetStackRoutes(stackID string) map[string]int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	src, exists := p.stackRoutes[stackID]
-	if !exists {
-		return nil
-	}
-	out := make(map[string]int, len(src))
-	for k, v := range src {
-		out[k] = v
-	}
-	return out
-}
-
-// GetAllStackRoutes returns all stack routes.
-func (p *ExternalProxy) GetAllStackRoutes() map[string]map[string]int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	out := make(map[string]map[string]int, len(p.stackRoutes))
-	for stackID, routes := range p.stackRoutes {
-		out[stackID] = make(map[string]int, len(routes))
-		for path, port := range routes {
-			out[stackID][path] = port
-		}
-	}
-	return out
-}
-
-// HasStackRoutes checks if a stack has any routes.
-func (p *ExternalProxy) HasStackRoutes(stackID string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	_, exists := p.stackRoutes[stackID]
-	return exists
 }
 
 // GetPort returns the proxy port.
@@ -243,4 +107,16 @@ func (p *ExternalProxy) GetPort() int {
 // GetBindAddr returns the bind address.
 func (p *ExternalProxy) GetBindAddr() string {
 	return p.bindAddr
+}
+
+// GetRoutes returns a copy of the current routes.
+func (p *ExternalProxy) GetRoutes() map[string]int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make(map[string]int, len(p.routes))
+	for k, v := range p.routes {
+		out[k] = v
+	}
+	return out
 }

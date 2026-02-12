@@ -58,10 +58,13 @@ const (
 type Service struct {
 	ID                  string            `json:"id"`
 	Name                string            `json:"name"`
+	ServiceType         string            `json:"service_type"`
 	GitURL              string            `json:"git_url"`
 	GitRef              string            `json:"git_ref"`
 	GitCommit           string            `json:"git_commit"`
 	GitSSHKey           string            `json:"git_ssh_key"`
+	DockerImage         string            `json:"docker_image"`
+	DockerRunArgs       string            `json:"docker_run_args"`
 	BuildCommand        string            `json:"build_command"`
 	RunCommand          string            `json:"run_command"`
 	Runtime             string            `json:"runtime"`
@@ -72,7 +75,7 @@ type Service struct {
 	BaseImage           string            `json:"base_image"` // Optional: override default base image
 	Language            string            `json:"language"`   // Language/runtime: nodejs, golang, python, rust, java, generic, auto
 	Port                int               `json:"port"`
-	ExternalPath        string            `json:"external_path"`
+	Hostname            string            `json:"hostname"`
 	HealthCheckPath     string            `json:"health_check_path"`
 	HealthCheckInterval int               `json:"health_check_interval"` // Defaults to global config
 	EnvironmentVars     map[string]string `json:"environment_vars"`
