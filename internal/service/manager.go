@@ -263,6 +263,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 			m.reportLifecycle(service, "error", "unknown", fmt.Sprintf("proxy update failed: %v", err))
 			return fmt.Errorf("proxy update failed, rolled back to blue: %w", err)
 		}
+		log.Printf("[ServiceManager] Blue/green traffic cutover: service=%s fromPort=%d toPort=%d", service.ID, currentInfo.port, targetPort)
 	}
 
 	time.Sleep(ConnectionDrainTimeout)
@@ -271,6 +272,7 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 		m.logVerbose("Failed to stop blue container: %v", err)
 	}
 	_ = DisconnectContainerFromStackNetwork(currentInfo.containerName, service.ID)
+	log.Printf("[ServiceManager] Blue/green switch: service=%s oldPort=%d newPort=%d oldContainer=%s newContainer=%s", service.ID, currentInfo.port, targetPort, currentInfo.containerName, greenContainerName)
 
 	activeContainerName := greenContainerName
 	if err := renameContainer(greenContainerName, containerName); err != nil {
