@@ -53,6 +53,14 @@ func (m *Manager) CloneOrPull(serviceID string, gitURL string, gitRef string, gi
 	if gitCommit != "" {
 		resolved, err := m.checkoutCommit(repoPath, repo, gitCommit, sshKeyName)
 		if err != nil {
+			if shouldRecloneAfterSyncError(err) {
+				log.Printf("Git sync recover: recloning repo for service=%s after commit checkout error: %v", serviceID, err)
+				recovered, recoverErr := m.recloneAndResolveCommit(repoPath, gitURL, gitCommit, sshKeyName)
+				if recoverErr == nil {
+					return recovered, nil
+				}
+				return "", recoverErr
+			}
 			return "", err
 		}
 		return resolved, nil
@@ -64,10 +72,56 @@ func (m *Manager) CloneOrPull(serviceID string, gitURL string, gitRef string, gi
 
 	resolved, err := m.checkoutRef(repoPath, repo, gitRef, sshKeyName)
 	if err != nil {
+		if shouldRecloneAfterSyncError(err) {
+			log.Printf("Git sync recover: recloning repo for service=%s after ref checkout error: %v", serviceID, err)
+			recovered, recoverErr := m.recloneAndResolveRef(repoPath, gitURL, gitRef, sshKeyName)
+			if recoverErr == nil {
+				return recovered, nil
+			}
+			return "", recoverErr
+		}
 		return "", err
 	}
 
 	return resolved, nil
+}
+
+func shouldRecloneAfterSyncError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "bad object refs/remotes/") ||
+		strings.Contains(msg, "did not send all necessary objects") ||
+		strings.Contains(msg, "reference has changed concurrently")
+}
+
+func (m *Manager) recloneAndResolveRef(repoPath, gitURL, gitRef, sshKeyName string) (string, error) {
+	if err := os.RemoveAll(repoPath); err != nil {
+		return "", fmt.Errorf("failed to remove corrupted repository: %w", err)
+	}
+	if err := m.clone(gitURL, repoPath, sshKeyName); err != nil {
+		return "", fmt.Errorf("failed to re-clone repository: %w", err)
+	}
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open re-cloned repository: %w", err)
+	}
+	return m.checkoutRef(repoPath, repo, gitRef, sshKeyName)
+}
+
+func (m *Manager) recloneAndResolveCommit(repoPath, gitURL, gitCommit, sshKeyName string) (string, error) {
+	if err := os.RemoveAll(repoPath); err != nil {
+		return "", fmt.Errorf("failed to remove corrupted repository: %w", err)
+	}
+	if err := m.clone(gitURL, repoPath, sshKeyName); err != nil {
+		return "", fmt.Errorf("failed to re-clone repository: %w", err)
+	}
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open re-cloned repository: %w", err)
+	}
+	return m.checkoutCommit(repoPath, repo, gitCommit, sshKeyName)
 }
 
 // clone clones a repository
