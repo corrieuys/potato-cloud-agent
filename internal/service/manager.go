@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -22,6 +23,7 @@ const (
 	HealthCheckInterval    = 30 * time.Second
 	ConnectionDrainTimeout = 30 * time.Second
 	MaxConcurrentBuilds    = 3
+	DockerBuildTimeout     = 10 * time.Minute
 	ContainerPrefix        = "potato-cloud"
 	ImagePrefix            = "potato-cloud"
 )
@@ -156,7 +158,12 @@ func (m *Manager) initialDeploy(service api.Service, containerName, imageTag str
 
 	if m.proxyUpdater != nil {
 		if err := m.proxyUpdater(service.ID, port); err != nil {
-			m.logVerbose("Failed to update proxy routes: %v", err)
+			log.Printf("[ServiceManager] Proxy update failed during initial deploy: service=%s err=%v", service.ID, err)
+			_ = m.stopContainer(containerName)
+			_ = DisconnectContainerFromStackNetwork(containerID, service.ID)
+			m.portMgr.Release(service.ID)
+			m.reportLifecycle(service, "error", "unknown", fmt.Sprintf("proxy update failed: %v", err))
+			return fmt.Errorf("proxy update failed: %w", err)
 		}
 	}
 
@@ -250,7 +257,11 @@ func (m *Manager) blueGreenDeploy(service api.Service, currentInfo *containerInf
 
 	if m.proxyUpdater != nil {
 		if err := m.proxyUpdater(service.ID, targetPort); err != nil {
-			m.logVerbose("Failed to update proxy routes to green: %v", err)
+			log.Printf("[ServiceManager] Proxy update failed, rolling back: service=%s err=%v", service.ID, err)
+			_ = m.stopContainer(greenContainerName)
+			_ = DisconnectContainerFromStackNetwork(greenContainerID, service.ID)
+			m.reportLifecycle(service, "error", "unknown", fmt.Sprintf("proxy update failed: %v", err))
+			return fmt.Errorf("proxy update failed, rolled back to blue: %w", err)
 		}
 	}
 
@@ -380,13 +391,18 @@ func (m *Manager) buildServiceImage(service api.Service, imageTag string) (strin
 		}()
 	}
 
-	log.Printf("[ServiceManager] Docker build start: service=%s image=%s", service.ID, imageTag)
-	buildCmd := exec.Command("docker", "build", "-t", imageTag, "-f", dockerfilePath, contextPath)
+	log.Printf("[ServiceManager] Docker build start: service=%s image=%s timeout=%s", service.ID, imageTag, DockerBuildTimeout)
+	buildCtx, buildCancel := context.WithTimeout(context.Background(), DockerBuildTimeout)
+	defer buildCancel()
+	buildCmd := exec.CommandContext(buildCtx, "docker", "build", "-t", imageTag, "-f", dockerfilePath, contextPath)
 	if m.verbose {
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
 	}
 	if err := buildCmd.Run(); err != nil {
+		if buildCtx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("docker build timed out after %s: %w", DockerBuildTimeout, err)
+		}
 		return "", fmt.Errorf("docker build failed: %w", err)
 	}
 	log.Printf("[ServiceManager] Docker build complete: service=%s elapsed=%s", service.ID, time.Since(start))

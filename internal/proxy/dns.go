@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -20,6 +21,36 @@ func NewDNSManager() *DNSManager {
 		hostsFile: "/etc/hosts",
 		services:  make(map[string]bool),
 	}
+}
+
+// atomicWriteFile writes content to a temp file then renames it into place
+// for crash-safe updates.
+func atomicWriteFile(path string, content []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to chmod temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+	return nil
 }
 
 // UpdateServices updates the DNS entries for services
@@ -54,9 +85,9 @@ func (d *DNSManager) UpdateServices(serviceNames []string) error {
 		newLines = append(newLines, fmt.Sprintf("127.0.0.1 %s.svc.internal", name))
 	}
 
-	// Write back
+	// Atomic write
 	newContent := strings.Join(newLines, "\n")
-	if err := os.WriteFile(d.hostsFile, []byte(newContent), 0644); err != nil {
+	if err := atomicWriteFile(d.hostsFile, []byte(newContent), 0644); err != nil {
 		return fmt.Errorf("failed to write hosts file: %w", err)
 	}
 
@@ -93,7 +124,7 @@ func (d *DNSManager) Cleanup() error {
 	}
 
 	newContent := strings.Join(newLines, "\n")
-	return os.WriteFile(d.hostsFile, []byte(newContent), 0644)
+	return atomicWriteFile(d.hostsFile, []byte(newContent), 0644)
 }
 
 // ReadHosts reads and parses the hosts file

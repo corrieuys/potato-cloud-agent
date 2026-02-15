@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Manager handles secure storage of secrets on the agent
@@ -32,13 +35,14 @@ func NewManager(secretsDir string, agentID string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create secrets directory: %w", err)
 	}
 
-	// Derive encryption key from agent ID
+	// Derive encryption key from agent ID using PBKDF2
 	// This means secrets can only be decrypted by this specific agent
-	hash := sha256.Sum256([]byte(agentID + "-buildvigil-secret-key"))
+	salt := []byte("potato-cloud-agent-" + agentID)
+	key := pbkdf2.Key([]byte(agentID), salt, 100000, 32, sha256.New)
 
 	return &Manager{
 		secretsDir: secretsDir,
-		key:        hash[:],
+		key:        key,
 	}, nil
 }
 
@@ -133,12 +137,19 @@ func (m *Manager) GetAllSecretsForService(serviceID string) (map[string]string, 
 	}
 
 	secrets := make(map[string]string)
+	var decryptErrors []string
 	for _, name := range names {
 		value, err := m.GetSecret(name, serviceID)
 		if err != nil {
-			continue // Skip secrets we can't read
+			log.Printf("[Secrets] WARNING: failed to decrypt secret %q for service %s: %v", name, serviceID, err)
+			decryptErrors = append(decryptErrors, name)
+			continue
 		}
 		secrets[name] = value
+	}
+
+	if len(decryptErrors) > 0 {
+		return secrets, fmt.Errorf("failed to decrypt %d secret(s): %v", len(decryptErrors), decryptErrors)
 	}
 
 	return secrets, nil

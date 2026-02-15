@@ -294,10 +294,16 @@ func (m *Manager) cleanupOldImages(serviceID string, keep int) {
 		return iTime.After(jTime)
 	})
 
-	for _, img := range images[keep:] {
-		m.logVerbose("Removing old image: %s", img.Tag)
-		if err := removeImage(img.ID); err != nil {
-			m.logVerbose("Failed to remove image %s: %v", img.Tag, err)
+	toRemove := images[keep:]
+	imageIDs := make([]string, 0, len(toRemove))
+	for _, img := range toRemove {
+		m.logVerbose("Queuing old image for removal: %s", img.Tag)
+		imageIDs = append(imageIDs, img.ID)
+	}
+	if len(imageIDs) > 0 {
+		args := append([]string{"rmi", "-f"}, imageIDs...)
+		if out, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+			m.logVerbose("Failed to batch remove images: %v (output: %s)", err, strings.TrimSpace(string(out)))
 		}
 	}
 }
