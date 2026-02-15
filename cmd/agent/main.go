@@ -28,6 +28,8 @@ type optionalString struct {
 	set   bool
 }
 
+const branchSelfHealInterval = 15 * time.Minute
+
 func (o *optionalString) String() string {
 	return o.value
 }
@@ -172,20 +174,21 @@ func main() {
 	var fwMgr *firewall.Manager
 
 	// Create agent
-	agent := &Agent{
-		config:        cfg,
-		state:         stateMgr,
-		git:           gitMgr,
+		agent := &Agent{
+			config:        cfg,
+			state:         stateMgr,
+			git:           gitMgr,
 		services:      svcMgr,
 		api:           apiClient,
 		externalProxy: externalProxy,
 		internalProxy: internalProxy,
 		dnsMgr:        dnsMgr,
 		fwMgr:         fwMgr,
-		applyFirewall: *applyFirewall,
-		healthPort:    9090, // Health check server port
-		lifecycle:     make(map[string]api.ServiceStatus),
-	}
+			applyFirewall: *applyFirewall,
+			healthPort:    9090, // Health check server port
+			lifecycle:     make(map[string]api.ServiceStatus),
+			lastBranchSync: make(map[string]time.Time),
+		}
 	svcMgr.SetLifecycleReporter(agent.onServiceLifecycleEvent)
 
 	// Set up signal handling
@@ -264,6 +267,7 @@ type Agent struct {
 	heartbeatInterval int
 	lifecycleMu       sync.RWMutex
 	lifecycle         map[string]api.ServiceStatus
+	lastBranchSync    map[string]time.Time
 }
 
 // Run starts the agent main loop
@@ -275,7 +279,7 @@ func (a *Agent) Run() {
 	}
 	initialHeartbeatInterval := a.heartbeatInterval
 	a.heartbeatMu.Unlock()
-	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds (initial, may update from desired state)", a.config.PollInterval, initialHeartbeatInterval)
+	log.Printf("Agent run loop started: poll_interval=%ds heartbeat_interval=%ds branch_self_heal_interval=%s (initial, may update from desired state)", a.config.PollInterval, initialHeartbeatInterval, branchSelfHealInterval)
 
 	if a.externalProxy != nil {
 		go func() {
@@ -441,14 +445,15 @@ func (a *Agent) sync() error {
 				log.Printf("Failed to delete state for service %s: %v", proc.ServiceID, err)
 				hadErrors = true
 			}
-			if err := a.git.RemoveRepo(proc.ServiceID); err != nil {
-				log.Printf("Failed to remove repo for service %s: %v", proc.ServiceID, err)
-				hadErrors = true
+				if err := a.git.RemoveRepo(proc.ServiceID); err != nil {
+					log.Printf("Failed to remove repo for service %s: %v", proc.ServiceID, err)
+					hadErrors = true
+				}
+				delete(a.lastBranchSync, proc.ServiceID)
 			}
-		}
-	} else {
-		log.Printf("Failed to list existing services: %v", err)
-		hadErrors = true
+		} else {
+			log.Printf("Failed to list existing services: %v", err)
+			hadErrors = true
 	}
 
 	// Update proxy routes
@@ -490,10 +495,36 @@ func (a *Agent) sync() error {
 		if proc != nil {
 			resolvedCommit = proc.GitCommit
 		}
+		repoSynced := false
 
-		if stateChanged || needsDeploy {
+			// For branch-tracking git services (no pinned git_commit), do a slower self-heal sync.
+			// Webhooks should be the primary trigger for rapid deploys.
+			if !isDockerServiceType(svc.ServiceType) && strings.TrimSpace(svc.GitCommit) == "" {
+				shouldCheckBranchLatest := stateChanged || needsDeploy
+				if !shouldCheckBranchLatest {
+					lastCheck, ok := a.lastBranchSync[svc.ID]
+					shouldCheckBranchLatest = !ok || time.Since(lastCheck) >= branchSelfHealInterval
+				}
+				if shouldCheckBranchLatest {
+					latestCommit, err := a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
+					if err != nil {
+						a.onServiceLifecycleEvent(svc, "error", "unknown", err.Error())
+						log.Printf("Failed to sync repo for service %s: %v", svc.Name, err)
+						hadErrors = true
+						continue
+					}
+					resolvedCommit = latestCommit
+					svc.GitCommit = resolvedCommit
+					repoSynced = true
+					a.lastBranchSync[svc.ID] = time.Now()
+				}
+			} else {
+				delete(a.lastBranchSync, svc.ID)
+			}
+
+		if stateChanged || needsDeploy || repoSynced {
 			if !isDockerServiceType(svc.ServiceType) {
-				shouldSyncRepo := needsDeploy || proc == nil || strings.TrimSpace(svc.GitCommit) != "" || strings.TrimSpace(resolvedCommit) == ""
+				shouldSyncRepo := !repoSynced && (needsDeploy || proc == nil || strings.TrimSpace(svc.GitCommit) != "" || strings.TrimSpace(resolvedCommit) == "")
 				if shouldSyncRepo {
 					var err error
 					resolvedCommit, err = a.git.CloneOrPull(svc.ID, svc.GitURL, svc.GitRef, svc.GitCommit, svc.GitSSHKey)
